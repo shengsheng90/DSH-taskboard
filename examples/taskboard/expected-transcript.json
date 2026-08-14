@@ -1,0 +1,33 @@
+{
+  "identifier": "EX-1",
+  "states": [
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "todo",
+    "in_progress",
+    "in_review",
+    "done"
+  ],
+  "finalStatus": "done",
+  "claimStates": [
+    "submitted",
+    "submitted"
+  ],
+  "commentBodies": [
+    "First implementation\n\nVerification: node example assertion passed",
+    "Add a second independent verification.",
+    "Reworked implementation\n\nVerification: second assertion passed"
+  ],
+  "activityKinds": [
+    "task.created",
+    "task.approved",
+    "task.claimed",
+    "task.review-submitted",
+    "task.returned",
+    "task.claimed",
+    "task.review-submitted",
+    "task.accepted"
+  ]
+}

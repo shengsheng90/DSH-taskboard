@@ -1,0 +1,15 @@
+# Local SSH credentials
+xy-shengsheng
+xy-shengsheng.pub
+
+# Local project documents
+2026-08-14-native-taskboard-plugin.md
+2026-08-14-native-taskboard-plugin.zh.md
+
+# Generated development artifacts
+.DS_Store
+.dsh/
+.pnpm-store/
+node_modules/
+lib/
+*.tgz

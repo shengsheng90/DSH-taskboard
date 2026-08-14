@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Taskboard"
+  short_description: "Run the native task claim and review workflow"
+  default_prompt: "Use $manage-taskboard to claim an eligible task, complete and verify it, then submit it for human review."
