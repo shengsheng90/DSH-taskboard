@@ -19,8 +19,10 @@ pnpm test
 pnpm build
 pnpm example
 pnpm pack
-dsh plugin --profile web add ./shengsheng-dsh-taskboard-0.1.0.tgz
+dsh plugin --profile web add -w ./shengsheng-dsh-taskboard-0.1.0.tgz
 ```
+
+profile 目录是 pnpm workspace 根（`packages: [.]`），`add` 需带 `-w`（workspace root）；否则 pnpm 会报 `ERR_PNPM_ADDING_TO_ROOT`。
 
 `cordis.patch.yml` 组合 Host 插件；Client 挂载生成的 `taskboard` Remote namespace，并通过原生侧栏与 shell overlay 注册一级页面，不使用 iframe，也不建立第二套聊天数据库。
 

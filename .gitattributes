@@ -1,0 +1,14 @@
+# Canonical text form is LF, enforced at checkout too (mirrors the parent
+# DeepSeek Harness repo). Shell scripts in particular break on CRLF; without
+# this, a global `core.autocrlf=true` re-checks them out as CRLF.
+* text=auto eol=lf
+
+# Binary assets Git must never line-ending-convert.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.tgz binary

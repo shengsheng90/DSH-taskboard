@@ -35,8 +35,10 @@
 > 以下 `dsh` 均指第 1 步判定的调用方式：源码 checkout 时在 checkout 根目录改用 `pnpm dsh plugin --profile {{PROFILE}} add ...`。
 
 ```sh
-dsh plugin --profile {{PROFILE}} add {{PLUGIN_SOURCE}}
+dsh plugin --profile {{PROFILE}} add -w {{PLUGIN_SOURCE}}
 ```
+
+> `-w`（workspace root）必需：profile 目录是 pnpm workspace 根（`packages: [.]`），不加 `-w` 时 pnpm 会报 `ERR_PNPM_ADDING_TO_ROOT`。
 
 成功标志（全部满足）：
 - `~/.dsh/profiles/{{PROFILE}}/package.json` 的 `dependencies` 出现 `{{PKG_NAME}}`；
@@ -173,6 +175,7 @@ grep -iE 'failed|error' /tmp/dsh-harness-restart.log
 | 插件行加载失败 / 模块导入报错 | peer 依赖缺失 | 检查 `~/.dsh/profiles/node_modules` 回退链接；确认插件在 `bundles` 列表 |
 | 警告 `declares no dsh.bundle` | 包缺 bundle 声明 | 插件 package.json 补 `dsh.bundle.patch` 后重装 |
 | `pnpm add` 失败 | 网络 / pnpm 版本 | 检查 pnpm 版本与 registry 配置 |
+| `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace 根，`add` 未带 `-w` | 命令加 `-w`：`dsh plugin --profile {{PROFILE}} add -w <源>` |
 | 重启后 GUI 打不开 | 启动失败 | 看 `/tmp/dsh-harness-restart.log`；确认 CHECKOUT 路径与 `pnpm dsh` 可用 |
 
 ---

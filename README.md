@@ -28,8 +28,10 @@ pnpm example
 
 ```sh
 pnpm pack
-dsh plugin --profile web add ./shengsheng-dsh-taskboard-0.1.0.tgz
+dsh plugin --profile web add -w ./shengsheng-dsh-taskboard-0.1.0.tgz
 ```
+
+The profile directory is a pnpm workspace root (`packages: [.]`), so the `add` needs `-w` (workspace root); without it pnpm refuses with `ERR_PNPM_ADDING_TO_ROOT`.
 
 The package's `cordis.patch.yml` mounts one `taskboard` Host plugin. The native client contribution mounts its generated `taskboard` Remote namespace and registers a sidebar entry plus a shell overlay page; it does not use an iframe or a second chat runtime.
 
