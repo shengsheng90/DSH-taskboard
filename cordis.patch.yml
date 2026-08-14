@@ -1,0 +1,17 @@
+- insert:
+    - id: taskboard
+      name: '@shengsheng/dsh-taskboard'
+      config:
+        databasePath: !!js process.env.DSH_TASKBOARD_DATABASE ?? '.dsh/taskboard.sqlite'
+        attachmentRoot: !!js process.env.DSH_TASKBOARD_ATTACHMENTS ?? '.dsh/taskboard-attachments'
+        pageSize: 100
+        maxAttachmentBytes: 26214400
+        maxTaskAttachmentBytes: 104857600
+        minAutomationIntervalMs: 30000
+        maxProjectWorkers: 2
+        maxGlobalWorkers: 4
+        allowSharedWorktrees: false
+        clientRefreshIntervalMs: 15000
+        maxChangeWaiters: 128
+        maxChangeWatchMs: 30000
+        defaultAgentPreset: standard

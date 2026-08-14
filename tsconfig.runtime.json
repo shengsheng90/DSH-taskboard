@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@deepseek-ai/cordis": ["../deepseek-harness/vendor/cordis/src/index.ts"],
+      "@deepseek-ai/dsh-client-connection": ["../deepseek-harness/packages/client/connection/src/index.ts"],
+      "@deepseek-ai/dsh-client-connection/client": ["../deepseek-harness/packages/client/connection/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-locale/client": ["../deepseek-harness/packages/client/locale/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-runtime/client": ["../deepseek-harness/packages/client/runtime/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-ui-layout/client": ["../deepseek-harness/packages/client/ui-layout/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-ui-sidebar/client": ["../deepseek-harness/packages/client/ui-sidebar/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-ui-slots": ["../deepseek-harness/packages/client/ui-slots/src/index.ts"],
+      "@deepseek-ai/dsh-client-ui-slots/*": ["../deepseek-harness/packages/client/ui-slots/src/*"],
+      "@deepseek-ai/dsh-host-apiproxy/api": ["../deepseek-harness/packages/host/apiproxy/src/api/index.ts"],
+      "@deepseek-ai/dsh-host-webserver": ["../deepseek-harness/packages/host/webserver/src/index.ts"],
+      "@deepseek-ai/dsh-tools": ["../deepseek-harness/packages/core/tools/src/index.ts"],
+      "@deepseek-ai/dsh-agent": ["../deepseek-harness/packages/core/agent/src/index.ts"],
+      "@deepseek-ai/dsh-agent-presets": ["../deepseek-harness/packages/preset/agent-presets/src/index.ts"],
+      "@deepseek-ai/dsh-goal": ["../deepseek-harness/packages/goal/goal/src/index.ts"],
+      "@deepseek-ai/dsh-llm": ["../deepseek-harness/packages/llm/llm/src/index.ts"],
+      "@deepseek-ai/dsh-session": ["../deepseek-harness/packages/core/session/src/index.ts"],
+      "@deepseek-ai/dsh-workspace": ["../deepseek-harness/packages/workspace/workspace/src/index.ts"],
+      "@deepseek-ai/dsh-typert-protocol": ["../deepseek-harness/packages/typert/protocol/src/index.ts"],
+      "@deepseek-ai/schemastery": ["../deepseek-harness/vendor/schemastery/src/index.ts"],
+      "react": ["../deepseek-harness/packages/client/ui-sidebar/node_modules/react/index.js"],
+      "react/jsx-runtime": ["../deepseek-harness/packages/client/ui-sidebar/node_modules/react/jsx-runtime.js"]
+    }
+  }
+}
