@@ -97,7 +97,11 @@ test('explicit new Session creation carries an unsent task draft and returns the
 test('client copy selects complete Chinese and English labels from the browser language', () => {
   const zh = taskboardStrings('zh-CN')
   const en = taskboardStrings('en-US')
+  assert.equal(zh.closeDetail, '关闭详情')
+  assert.equal(zh.save, '保存')
   assert.equal(zh.newSession, '在新会话中打开')
+  assert.equal(en.closeDetail, 'Close details')
+  assert.equal(en.save, 'Save')
   assert.equal(zh.developmentContext, '开发上下文')
   assert.equal(zh.pauseUncertain, '配额不确定时暂停')
   assert.equal(en.newSession, 'Open in new session')
