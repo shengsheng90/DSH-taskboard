@@ -5,6 +5,18 @@
   "type": "module",
   "packageManager": "pnpm@11.15.1",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shengsheng90/DSH-taskboard.git"
+  },
+  "homepage": "https://github.com/shengsheng90/DSH-taskboard#readme",
+  "bugs": {
+    "url": "https://github.com/shengsheng90/DSH-taskboard/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },

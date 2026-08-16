@@ -4,16 +4,16 @@
 
 这是 DeepSeek Harness 的原生本地项目任务板插件。SQLite 是任务共享状态的唯一权威；Agent Session、Goal、Workspace、工具、权限和对话历史仍由 Harness 管理。
 
-本文同时写给操作者和**其他大模型**：按顺序执行「安装到 DeepSeek Harness」即可完成探测、打包、安装、组成验证、重启激活，无需猜测命令。
+本文同时写给操作者和**其他大模型**：按顺序执行「安装到 DeepSeek Harness」即可完成探测、从 npm 安装、组成验证、重启激活，无需猜测命令。
 
-**包名：** `@shengsheng/dsh-taskboard`  
+**包名：** [`@shengsheng/dsh-taskboard`](https://www.npmjs.com/package/@shengsheng/dsh-taskboard)  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
 **兼容 Host：** DeepSeek Harness `0.1.0-rc.5`
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
-若你是负责安装的代理，直接从 [安装到 DeepSeek Harness](#安装到-deepseek-harness) 按步执行。**不要**把本仓库当作未构建的 git 依赖安装：`lib/` 已被 gitignore，git 安装不会带上编译后的 Host/Client 产物。
+若你是负责安装的代理，直接从 [安装到 DeepSeek Harness](#安装到-deepseek-harness) 按步执行。优先安装已发布的 npm 包。**不要**把本仓库当作未构建的 git 依赖安装：`lib/` 已被 gitignore，git 安装不会带上编译后的 Host/Client 产物。
 
 ## 安装后会得到什么
 
@@ -38,7 +38,7 @@ Agent 只能把已验证工作提交到 `in_review`；只有经过认证的用�
 | Node.js | `^22.19.0` 或 `>=24.0.0`（推荐 24；使用内置 `node:sqlite`） |
 | pnpm | `11`（`packageManager` 为 `pnpm@11.15.1`） |
 | DeepSeek Harness | `0.1.0-rc.5` 的 checkout 或安装，**web** profile |
-| 网络 | 仅克隆本仓库和安装 Node 依赖时需要 |
+| 网络 | 需要能访问 npm registry 以安装 `@shengsheng/dsh-taskboard`；只有本地开发才需要克隆本仓库 |
 | 权限 | 可写 `$DSH_HOME`（默认 `~/.dsh`），并能重启 Harness 进程 |
 
 安装前先确认工具链：
@@ -55,12 +55,13 @@ pnpm -v    # 11.x
 | 名称 | 取值 |
 |---|---|
 | 包名 | `@shengsheng/dsh-taskboard` |
+| npm | https://www.npmjs.com/package/@shengsheng/dsh-taskboard |
 | 默认 profile | `web` |
 | 默认 Web 端口 | `3080`（先探测，不要假定） |
 | Profile 目录 | `$DSH_HOME/profiles/<profile>`，通常是 `~/.dsh/profiles/web` |
-| 打包文件名 | `shengsheng-dsh-taskboard-<version>.tgz` |
+| 打包文件名 | `shengsheng-dsh-taskboard-<version>.tgz`（仅本地开发） |
 
-`<version>` 以本仓库 `package.json` 为准（撰写时为 `0.1.0`）。`pnpm pack` 之后使用实际生成的 tarball。
+默认安装已发布的 npm 包。`<version>` 以本仓库 `package.json` 为准（撰写时为 `0.1.0`）。只有在开发本仓库时才使用本地 tarball。
 
 给 Harness 内代理使用的一键粘贴提示词见 [docs/install-plugin-prompt.zh.md](docs/install-plugin-prompt.zh.md)。下面是规范安装步骤。
 
@@ -84,9 +85,25 @@ lsof -p <PID> -a -d cwd
 
 下文的 `dsh` 均指上一步判定的那种形式。首次使用某个 profile 时会自动初始化，并打底 `@deepseek-ai/dsh-base`。
 
-### 2. 构建并打包（必须）
+### 2. 从 npm 安装插件
 
-`lib/` 不在 git 中。必须先 build，再 pack。把未构建的 git 树或工作副本直接加进 profile，会得到没有 Host/Client 产物的包。
+profile 目录是 pnpm workspace 根（`packages: [.]`）。**必须**带 `-w`（workspace root）。不加时 pnpm 会报 `ERR_PNPM_ADDING_TO_ROOT`。
+
+```sh
+dsh plugin --profile web add -w @shengsheng/dsh-taskboard
+```
+
+这会从 npm registry 安装最新已发布版本。需要固定版本时再加版本号：
+
+```sh
+dsh plugin --profile web add -w @shengsheng/dsh-taskboard@0.1.0
+```
+
+该命令可能改写 profile 的 `package.json`、lockfile 和 `node_modules`，这是预期行为。
+
+### 3. 可选：从本地 tarball 安装
+
+`lib/` 不在 git 中。只有在改本仓库时才需要先 build，再 pack。把未构建的 git 树或工作副本直接加进 profile，会得到没有 Host/Client 产物的包。
 
 ```sh
 git clone https://github.com/shengsheng90/DSH-taskboard.git
@@ -94,6 +111,7 @@ cd DSH-taskboard
 pnpm install
 pnpm build
 pnpm pack
+dsh plugin --profile web add -w /absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-0.1.0.tgz
 ```
 
 预期产物：
@@ -101,25 +119,7 @@ pnpm pack
 - `lib/index.js`、`lib/cli.js`、`lib/client.js`（及对应声明文件）
 - 仓库根目录的 `shengsheng-dsh-taskboard-<version>.tgz`
 
-记下 tarball 的绝对路径，例如：
-
-```text
-/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-0.1.0.tgz
-```
-
-若仓库已经克隆且依赖已安装，执行 `pnpm build && pnpm pack` 即可。可选本地检查：`pnpm typecheck`、`pnpm test`、`pnpm example`。
-
-### 3. 把插件加到 profile
-
-profile 目录是 pnpm workspace 根（`packages: [.]`）。**必须**带 `-w`（workspace root）。不加时 pnpm 会报 `ERR_PNPM_ADDING_TO_ROOT`。
-
-```sh
-dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-0.1.0.tgz
-```
-
-优先安装打包后的 tarball，不要直接加源码目录。源码目录若未 build，会缺 `lib/`。
-
-该命令可能改写 profile 的 `package.json`、lockfile 和 `node_modules`，这是预期行为。
+若仓库已经克隆且依赖已安装，执行 `pnpm build && pnpm pack` 即可。优先安装打包后的 tarball，不要直接加源码目录。可选本地检查：`pnpm typecheck`、`pnpm test`、`pnpm example`。
 
 同时满足以下全部条件才算安装成功：
 
@@ -214,7 +214,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 |---|---|---|
 | `dsh: command not found` | CLI 未入 `PATH` | 在 Harness checkout 根目录用 `pnpm dsh ...` |
 | `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace 根 | 命令加 `-w` |
-| git / 目录安装没有 `lib/` | `lib/` 被 gitignore | `pnpm build && pnpm pack`，再添加 `.tgz` |
+| git / 目录安装没有 `lib/` | `lib/` 被 gitignore | 从 npm 安装，或 `pnpm build && pnpm pack` 后再添加 `.tgz` |
 | 写 `~/.dsh` 报 `EPERM` | 沙箱限制 | 向操作者申请完整权限；该写作为幂等重写 |
 | manifest / `client.js` 仍 404 | 未重启，或验证过早 | 重启后按第 7 步轮询 |
 | 导入 / apply 报错 | peer 缺失或未进入 bundles | 用 `--dump-config` 修复回退链接；确认 `dsh.profile.bundles` |
