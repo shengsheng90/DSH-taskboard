@@ -2,7 +2,7 @@
 
 > 把本文档**全文**复制，作为一条消息发给 DeepSeek Harness 中的任意代理（新会话或当前会话均可），代理会自动完成：**探测环境 → 安装 → 组成验证 → 模块冒烟 → 重启激活 → 验证报告**。
 >
-> 本提示词沉淀自一次真实的完整安装过程（`@shengsheng/dsh-taskboard` 安装到 `web` profile），包含过程中踩到的全部坑与对策。
+> 规范安装说明（中英双语、可被其他模型直接执行）见仓库 [README.md](../README.md) 与 [README.zh.md](../README.zh.md)。本提示词沉淀自一次真实的完整安装过程（`@shengsheng/dsh-taskboard` 安装到 `web` profile），包含过程中踩到的全部坑与对策。
 
 ---
 
