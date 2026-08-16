@@ -37,6 +37,10 @@ test('automation starts one stable eligible task through an owning worker', asyn
     assert.deepEqual(started, [task.id])
     assert.equal(service.provider.getTask(task.id).status, 'in_progress')
     assert.equal(service.provider.getAutomation(rule.id).lastDecision?.kind, 'claimed')
+    const runs = service.provider.listAutomationRuns(project.id)
+    assert.equal(runs[0]?.decision.kind, 'claimed')
+    assert.equal(runs[0]?.decision.taskId, task.id)
+    assert.equal(service.snapshot(project.id).automationRuns[0]?.decision.kind, 'claimed')
     await coordinator.stop()
   } finally {
     service.provider.close()

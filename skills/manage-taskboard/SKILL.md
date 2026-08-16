@@ -14,7 +14,7 @@ Use the in-process `taskboard_*` tools for Agent work. Use `dsh-taskboard` only 
 3. Call `taskboard_claim` with that id and version. Treat a stale-version or claim conflict as a signal to reread and reconsider, not to retry blindly.
 4. Read the full description, comments, relations, dependency state, development context, and attachment references before changing files. Work only in the task's declared workspace, branch, or worktree.
 5. Complete the work and run relevant verification. If requirements change, call `taskboard_get` again before continuing.
-6. Record material findings with `taskboard_comment`, always using the version returned by the latest read or write.
+6. Record the final result with `taskboard_comment` or `taskboard_submit_review`, always using the version returned by the latest read or write. Never modify the task description.
 7. Call `taskboard_submit_review` with a concise result comment and concrete verification evidence. This moves owned work to `in_review`; it never marks work `done`.
 
 Keep every write version-linear: after any successful comment, relation, block, or other mutation, use its returned version for the next write. If another actor wins the race, reread the task and reconcile instead of overwriting their change.

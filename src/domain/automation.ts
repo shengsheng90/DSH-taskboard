@@ -30,3 +30,11 @@ export interface AutomationRule {
   readonly createdAt: number
   readonly updatedAt: number
 }
+
+/** One durable scheduler tick recorded when a rule reads Todo and decides what to start. */
+export interface AutomationRun {
+  readonly id: string
+  readonly ruleId: TaskboardAutomationId
+  readonly decision: AutomationDecision
+  readonly createdAt: number
+}

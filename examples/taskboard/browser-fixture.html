@@ -33,7 +33,7 @@
   <script src="/lib/client.js"></script>
   <script>
     const project = { id:'project-demo', key:'DSH', name:'Native Taskboard', workspaceId:'workspace-local', labels:['local','harness'], nextIssueNumber:8, version:3, createdAt:1, updatedAt:1 }
-    const task = (id, identifier, title, status, priority, extra={}) => ({ id, projectId:project.id, identifier, title, description:`## Acceptance\n\n- Verify ${title}\n- Submit evidence`, status, priority, labels:['demo'], sortOrder:Number(identifier.split('-')[1])*1000, creator:'human:demo', version:4, createdAt:1, updatedAt:1, ...extra })
+    const task = (id, identifier, title, status, priority, extra={}) => ({ id, projectId:project.id, identifier, title, description:`## Acceptance\n\n- Verify ${title}\n- Submit evidence`, status, priority, labels:['demo'], sortOrder:Number(identifier.split('-')[1])*1000, creator:'human:demo', version:4, createdAt:Date.now()-60000, updatedAt:Date.now()-60000, ...extra })
     const snapshot = {
       schemaVersion:1, globalRevision:42, projects:[project], refreshIntervalMs:300000,
       automationDefaults:{agentPreset:'standard'},
@@ -47,6 +47,11 @@
         task('t6','DSH-6','Future workflow node','backlog','none'),
       ],
       automations:[{id:'auto-1',projectId:project.id,config:{intervalMs:30000,agentPreset:'standard',concurrencyLimit:2,quotaPolicy:'pause-on-uncertain',autoPauseOnEmpty:false},state:'enabled',version:2,nextEligibleAt:Date.now()+60000,lastDecision:{kind:'claimed',taskId:'t2',message:'worker started for DSH-2',at:Date.now()},createdAt:1,updatedAt:1}],
+      automationRuns:[
+        {id:'run-3',ruleId:'auto-1',decision:{kind:'claimed',taskId:'t2',message:'worker started for DSH-2',at:Date.now()-30000},createdAt:Date.now()-30000},
+        {id:'run-2',ruleId:'auto-1',decision:{kind:'empty',message:'no eligible todo tasks',at:Date.now()-90000},createdAt:Date.now()-90000},
+        {id:'run-1',ruleId:'auto-1',decision:{kind:'claimed',taskId:'t1',message:'worker started for DSH-1',at:Date.now()-150000},createdAt:Date.now()-150000},
+      ],
       workflows:[{id:'wf-1',projectId:project.id,name:'Implement and review',version:2,createdAt:1,updatedAt:1,document:{tabs:[{id:'main',name:'Main',trigger:{id:'trigger',kind:'issue-trigger',execution:'design-only',config:{}},steps:[{id:'tests',kind:'tests',execution:'design-only',config:{}},{id:'review',kind:'review',execution:'design-only',config:{}}]}]}}],
       workflowCatalog:[{kind:'issue-trigger',category:'trigger',execution:'design-only'},{kind:'tests',category:'development',execution:'design-only'},{kind:'review',category:'taskboard',execution:'design-only'},{kind:'skill',category:'capability',execution:'design-only'},{kind:'mcp',category:'capability',execution:'design-only'}],
       workflowCapabilities:{skills:[{name:'manage-taskboard',description:'Manage native Taskboard work'}],mcpTools:[{name:'mcp__github__get_issue',description:'Read a GitHub issue'}],skillDiscoveryComplete:true},
@@ -85,6 +90,14 @@
         }
         if(index>=0 && endpoint==='task.accept'){
           fixtureClaims.delete(payload.taskId);return Promise.resolve(this.replaceTask(index,{status:'done'}))
+        }
+        if(index>=0 && endpoint==='task.move'){
+          return Promise.resolve(this.replaceTask(index,{status:payload.status,...(payload.sortOrder===undefined?{}:{sortOrder:payload.sortOrder})}))
+        }
+        if(index>=0 && endpoint==='task.comment'){
+          const comments=fixtureComments.get(payload.taskId)||[]
+          fixtureComments.set(payload.taskId,[...comments,{id:`comment-${Date.now()}`,taskId:payload.taskId,body:payload.body,authorId:'human:fixture',version:1,createdAt:Date.now(),updatedAt:Date.now()}])
+          return Promise.resolve(this.replaceTask(index,{}))
         }
         if(index>=0 && (endpoint==='task.archive'||endpoint==='task.restore')){
           const current=snapshot.tasks[index]

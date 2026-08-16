@@ -63,6 +63,9 @@ test('CLI round-trips project, task, relation, attachment, workflow, automation,
   })]) as { id: string; version: number }
   first = invoke(['task', 'approve', '--task', first.id, '--version', String(first.version)]) as typeof first
   first = invoke(['task', 'update', '--task', first.id, '--version', String(first.version), '--request-json', JSON.stringify({ priority: 'urgent' })]) as typeof first
+  first = invoke(['task', 'move', '--task', first.id, '--version', String(first.version), '--status', 'in_progress']) as typeof first
+  assert.equal((invoke(['task', 'get', '--task', first.id]) as { task: { status: string } }).task.status, 'in_progress')
+  first = invoke(['task', 'move', '--task', first.id, '--version', String(first.version), '--status', 'todo']) as typeof first
   const comment = invoke(['task', 'comment', '--task', first.id, '--version', String(first.version), '--body', 'CLI comment']) as { id: string }
   first = { ...first, version: task(first.id).version }
   assert.equal((invoke(['task', 'list', '--project', project.id, '--status', 'todo', '--search', 'First']) as unknown[]).length, 1)

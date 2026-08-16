@@ -63,7 +63,7 @@ export const Config: z<Config> = z.object({
 export function apply(ctx: Context, config: Config): void {
   const service = new TaskboardService(ctx, config)
   ctx.inject(['tools'], (toolCtx) => { registerTaskboardTools(toolCtx, service) })
-  ctx.inject(['agents', 'goals', 'workspaceRegistry', 'agentPresets'], (nativeCtx) => {
+  ctx.inject(['agents', 'goals', 'workspaceRegistry', 'agentPresets', 'agentDefaultModel'], (nativeCtx) => {
     const worker = new HarnessTaskboardWorker(nativeCtx, service)
     const automation = new TaskboardAutomationCoordinator(service, worker)
     nativeCtx.effect(() => {

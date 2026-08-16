@@ -396,3 +396,46 @@ test('queues task-owned attachment bytes for recoverable cleanup on permanent de
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test('human status move can change any column and releases an in-progress claim', () => {
+  const provider = memoryProvider()
+  try {
+    let task = seed(provider)
+    task = provider.approve(task.id, task.version, human)
+    task = provider.claim(task.id, {
+      expectedVersion: task.version, sessionId: agent.sessionId, agentId: agent.agentId,
+    }, agent).task
+    assert.throws(() => provider.moveStatus(task.id, task.version, 'in_review', agent), expectCode('TASK_HUMAN_AUTHORITY_REQUIRED'))
+    task = provider.moveStatus(task.id, task.version, 'in_review', human, 12.5)
+    assert.equal(task.status, 'in_review')
+    assert.equal(task.sortOrder, 12.5)
+    assert.equal(provider.getTaskDetail(task.id).activeClaim, undefined)
+    assert.equal(provider.getTaskDetail(task.id).activities.at(-1)?.kind, 'task.status-moved')
+    task = provider.moveStatus(task.id, task.version, 'done', human)
+    assert.equal(task.status, 'done')
+  } finally {
+    provider.close()
+  }
+})
+
+test('records automation run history when a scheduler decision is persisted', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    let rule = provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'ignore', autoPauseOnEmpty: false,
+    }, human)
+    rule = provider.recordAutomationDecision(rule.id, rule.version, {
+      kind: 'empty', message: 'no eligible todo tasks', at: 10,
+    }, 40)
+    rule = provider.recordAutomationDecision(rule.id, rule.version, {
+      kind: 'claimed', taskId: 'task-one', message: 'worker started for DSH-1', at: 20,
+    }, 50)
+    const runs = provider.listAutomationRuns(project.id)
+    assert.equal(runs.length, 2)
+    assert.equal(runs[0]?.decision.kind, 'claimed')
+    assert.equal(runs[1]?.decision.kind, 'empty')
+  } finally {
+    provider.close()
+  }
+})

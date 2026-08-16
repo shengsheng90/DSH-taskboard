@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentHandle, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -25,6 +25,15 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Host default used when an automation rule does not name a modelRoute. */
+    agentDefaultModel: {
+      currentSelection(): ModelSelection
+    }
+  }
+}
+
 function route(value: string | undefined): { provider: string; model: string } | undefined {
   if (value === undefined) return undefined
   const at = value.includes(':') ? value.indexOf(':') : value.indexOf('/')
@@ -32,6 +41,25 @@ function route(value: string | undefined): { provider: string; model: string } |
     throw new TaskboardError('automation modelRoute must be provider:model or provider/model', 'TASK_INVALID_INPUT')
   }
   return { provider: value.slice(0, at), model: value.slice(at + 1) }
+}
+
+function withReasoning(selection: ModelSelection, reasoning: string | undefined): ModelSelection {
+  if (reasoning === undefined) return selection
+  return { ...selection, reasoningEffort: ReasoningEffortId(reasoning) }
+}
+
+/** Resolve the model an automation worker must install before prompt assembly. */
+export function resolveAutomationModel(ctx: Context, rule: AutomationRule): ModelSelection {
+  const explicit = route(rule.config.modelRoute)
+  if (explicit !== undefined) return withReasoning(explicit, rule.config.reasoning)
+  const selected = ctx.get('agentDefaultModel')?.currentSelection()
+  if (selected === undefined || selected.provider.length === 0 || selected.model.length === 0) {
+    throw new TaskboardError(
+      'automation modelRoute is empty and the Host default model is unavailable',
+      'TASK_INVALID_INPUT',
+    )
+  }
+  return withReasoning(selected, rule.config.reasoning)
 }
 
 function actor(rule: AutomationRule, claim: Pick<TaskboardClaim, 'sessionId' | 'agentId'>): AutomationActor {
@@ -42,6 +70,11 @@ function actor(rule: AutomationRule, claim: Pick<TaskboardClaim, 'sessionId' | '
     sessionId: claim.sessionId,
     agentId: claim.agentId,
   }
+}
+
+/** Prefer a short review marker when a result comment already exists. */
+export function completionResultComment(comments: readonly { readonly body: string }[]): string {
+  return comments.some(item => item.body.trim() !== '') ? 'Ready for review.' : 'Work completed.'
 }
 
 /** Render the complete durable task instruction admitted to a worker Session. */
@@ -88,7 +121,7 @@ export function renderTaskInstruction(service: TaskboardService, taskId: string,
     'Attachment references:',
     attachments,
     '',
-    'Read the task again before every write. Complete and verify the work, record concrete evidence, then use taskboard_submit_review. Only a human may accept it as done.',
+    'Read the task again before every write. Complete and verify the work, then record the final result with taskboard_comment or taskboard_submit_review. Never modify the task description. Only a human may accept it as done.',
   ].join('\n')
 }
 
@@ -148,25 +181,23 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
         ? undefined
         : this.ctx.workspaceRegistry.get(WorkspaceId(project.workspaceId))
       const cwd = task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : workspace?.path
+      const selection = resolveAutomationModel(this.ctx, rule)
+      const agentOptions = { provider: selection.provider, model: selection.model }
       const setup = async (agentCtx: Context): Promise<void> => {
+        const selected: ModelSelectionRef = { current: selection, assembled: undefined }
+        agentCtx.effect(() => installModelSelection(agentCtx, selected), 'taskboard: automation model route')
         await this.ctx.agentPresets.mount(agentCtx, rule.config.agentPreset)
-        const selectedRoute = route(rule.config.modelRoute)
-        if (selectedRoute !== undefined) {
-          const selection: ModelSelectionRef = {
-            current: {
-              ...selectedRoute,
-              ...(rule.config.reasoning === undefined ? {} : { reasoningEffort: ReasoningEffortId(rule.config.reasoning) }),
-            },
-            assembled: undefined,
-          }
-          agentCtx.effect(() => installModelSelection(agentCtx, selection), 'taskboard: automation model route')
-        }
       }
       handle = resume
-        ? await this.ctx.agents.resume({ resumeSessionId: SessionId(initialClaim.sessionId), setup })
+        ? await this.ctx.agents.resume({
+          resumeSessionId: SessionId(initialClaim.sessionId),
+          agentOptions,
+          setup,
+        })
         : await this.ctx.agents.create({
           sessionId: SessionId(initialClaim.sessionId),
           meta: { ...(cwd === undefined ? {} : { cwd }), agentPreset: rule.config.agentPreset },
+          agentOptions,
           setup,
         })
       this.handles.set(initialClaim.sessionId, handle)
@@ -207,8 +238,9 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
     if (goal.phase === 'complete') {
       this.taskboard.provider.submitReview(
         task.id, task.version,
-        `Harness Goal completed in Session ${claim.sessionId}; inspect its durable transcript and task comments.`,
-        `Automation worker completed Goal ${goal.id}.`, owner,
+        'Completed',
+        completionResultComment(this.taskboard.provider.getTaskDetail(task.id).comments),
+        owner,
       )
     } else if (goal.phase === 'blocked') {
       this.taskboard.provider.block(task.id, task.version, goal.blockedReason?.message ?? 'Harness Goal blocked', owner)
