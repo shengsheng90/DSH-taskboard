@@ -288,6 +288,48 @@ test('archives independently and deletes only archived unclaimed tasks', () => {
   }
 })
 
+test('humans can update and delete comments on the owning task', () => {
+  const provider = memoryProvider()
+  try {
+    let task = seed(provider)
+    const created = provider.comment(task.id, task.version, 'First draft', human)
+    task = provider.getTask(task.id)
+    assert.throws(() => provider.updateComment(task.id, task.version, created.id, 'Agent rewrite', agent), expectCode('TASK_HUMAN_AUTHORITY_REQUIRED'))
+    const updated = provider.updateComment(task.id, task.version, created.id, 'Revised draft', human)
+    assert.equal(updated.body, 'Revised draft')
+    assert.equal(updated.version, 2)
+    task = provider.getTask(task.id)
+    assert.equal(provider.getTaskDetail(task.id).comments[0]?.body, 'Revised draft')
+    provider.deleteComment(task.id, task.version, created.id, human)
+    assert.equal(provider.getTaskDetail(task.id).comments.length, 0)
+    assert.throws(() => provider.deleteComment(task.id, provider.getTask(task.id).version, created.id, human), expectCode('COMMENT_NOT_FOUND'))
+  } finally {
+    provider.close()
+  }
+})
+
+test('renaming or removing a project label rewrites every task that carries it', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness', labels: ['bug'] }, human)
+    let first = provider.createTask({ projectId: project.id, title: 'One', creator: human.actorId, labels: ['bug', 'ui'] }, human)
+    const second = provider.createTask({ projectId: project.id, title: 'Two', creator: human.actorId, labels: ['ui'] }, human)
+    const latest = provider.getProject(project.id)
+    const renamed = provider.renameProjectLabel(latest.id, latest.version, 'bug', 'defect', human)
+    assert.deepEqual(renamed.labels, ['defect'])
+    first = provider.getTask(first.id)
+    assert.deepEqual(first.labels, ['defect', 'ui'])
+    assert.deepEqual(provider.getTask(second.id).labels, ['ui'])
+    const cleared = provider.removeProjectLabel(renamed.id, renamed.version, 'ui', human)
+    assert.deepEqual(cleared.labels, ['defect'])
+    assert.deepEqual(provider.getTask(first.id).labels, ['defect'])
+    assert.deepEqual(provider.getTask(second.id).labels, [])
+    assert.throws(() => provider.renameProjectLabel(cleared.id, cleared.version, 'defect', 'defect', human), expectCode('TASK_INVALID_INPUT'))
+  } finally {
+    provider.close()
+  }
+})
+
 test('round-trips authoritative state across restart', () => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-'))
   const path = join(directory, 'taskboard.sqlite')

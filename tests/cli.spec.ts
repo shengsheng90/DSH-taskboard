@@ -54,6 +54,9 @@ test('CLI round-trips project, task, relation, attachment, workflow, automation,
   let project = invoke(['project', 'create', '--key', 'CLI', '--name', 'CLI project', '--workspace', 'workspace-one', '--labels', 'local,release']) as { id: string; version: number }
   project = invoke(['project', 'update', '--project', project.id, '--version', String(project.version), '--request-json', JSON.stringify({ name: 'CLI project updated' })]) as typeof project
   assert.equal((invoke(['project', 'get', '--project', project.id]) as { name: string }).name, 'CLI project updated')
+  project = invoke(['project', 'rename-label', '--project', project.id, '--version', String(project.version), '--from', 'local', '--to', 'laptop']) as typeof project
+  project = invoke(['project', 'remove-label', '--project', project.id, '--version', String(project.version), '--label', 'release']) as typeof project
+  assert.deepEqual((invoke(['project', 'get', '--project', project.id]) as { labels: string[] }).labels, ['laptop'])
   assert.equal((invoke(['project', 'list']) as unknown[]).length, 1)
 
   let first = invoke(['task', 'create', '--request-json', JSON.stringify({
@@ -66,7 +69,14 @@ test('CLI round-trips project, task, relation, attachment, workflow, automation,
   first = invoke(['task', 'move', '--task', first.id, '--version', String(first.version), '--status', 'in_progress']) as typeof first
   assert.equal((invoke(['task', 'get', '--task', first.id]) as { task: { status: string } }).task.status, 'in_progress')
   first = invoke(['task', 'move', '--task', first.id, '--version', String(first.version), '--status', 'todo']) as typeof first
-  const comment = invoke(['task', 'comment', '--task', first.id, '--version', String(first.version), '--body', 'CLI comment']) as { id: string }
+  const comment = invoke(['task', 'comment', '--task', first.id, '--version', String(first.version), '--body', 'CLI comment']) as { id: string; body: string }
+  first = { ...first, version: task(first.id).version }
+  const revised = invoke(['task', 'comment-update', '--task', first.id, '--version', String(first.version), '--comment', comment.id, '--body', 'CLI comment revised']) as { body: string }
+  assert.equal(revised.body, 'CLI comment revised')
+  first = { ...first, version: task(first.id).version }
+  const extraComment = invoke(['task', 'comment', '--task', first.id, '--version', String(first.version), '--body', 'temporary']) as { id: string }
+  first = { ...first, version: task(first.id).version }
+  invoke(['task', 'comment-delete', '--task', first.id, '--version', String(first.version), '--comment', extraComment.id])
   first = { ...first, version: task(first.id).version }
   assert.equal((invoke(['task', 'list', '--project', project.id, '--status', 'todo', '--search', 'First']) as unknown[]).length, 1)
 

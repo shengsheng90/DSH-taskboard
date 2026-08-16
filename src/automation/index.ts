@@ -18,6 +18,8 @@ const DEFAULT_QUOTA: TaskboardQuotaPolicy = { state: () => Promise.resolve('avai
 export class TaskboardAutomationCoordinator {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly inFlight = new Set<Promise<void>>()
+  private readonly inFlightByRule = new Map<string, Set<Promise<void>>>()
+  private readonly draining = new Set<string>()
   private readonly runningByProject = new Map<string, number>()
   private running = false
   private rescanQueued = false
@@ -50,18 +52,38 @@ export class TaskboardAutomationCoordinator {
     await this.tick(ruleId)
   }
 
+  /** Extra drain that starts eligible work now without moving the durable schedule. */
+  async runImmediate(ruleId: string): Promise<void> {
+    if (this.draining.has(ruleId)) return
+    const scheduledAt = this.taskboard.provider.getAutomation(ruleId).nextEligibleAt
+    this.draining.add(ruleId)
+    try {
+      await this.drain(ruleId, this.running, {
+        preserveSchedule: true,
+        ...(scheduledAt === undefined ? {} : { scheduledAt }),
+      })
+    } finally {
+      this.draining.delete(ruleId)
+      if (this.running) {
+        const latest = this.taskboard.provider.getAutomation(ruleId)
+        this.schedule(scheduledAt === undefined ? latest : { ...latest, nextEligibleAt: scheduledAt })
+      }
+    }
+  }
+
   async stop(): Promise<void> {
     this.running = false
     this.unsubscribe?.()
     this.unsubscribe = undefined
     this.rescanQueued = false
+    this.draining.clear()
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
     await Promise.allSettled([...this.inFlight])
   }
 
   private schedule(rule: AutomationRule): void {
-    if (!this.running || rule.state !== 'enabled') return
+    if (!this.running || rule.state !== 'enabled' || this.draining.has(rule.id)) return
     const at = rule.nextEligibleAt ?? Date.now()
     const delay = Math.min(Math.max(0, at - Date.now()), 2_147_483_647)
     const timer = setTimeout(() => {
@@ -88,65 +110,111 @@ export class TaskboardAutomationCoordinator {
   }
 
   private async tick(ruleId: string): Promise<void> {
-    let rule = this.taskboard.provider.getAutomation(ruleId)
-    if (!this.running && this.timers.size > 0) return
-    if (rule.state !== 'enabled') return
-    const quota = await this.quota.state(rule)
-    if (quota === 'uncertain' && rule.config.quotaPolicy === 'pause-on-uncertain') {
-      rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
-        kind: 'quota-paused', message: 'quota state is uncertain; no new claims started', at: Date.now(),
-      }, undefined, 'paused')
-      this.refresh(rule)
-      return
+    if (this.draining.has(ruleId)) return
+    this.draining.add(ruleId)
+    this.cancelTimer(ruleId)
+    const coordinatorActive = this.running
+    try {
+      await this.drain(ruleId, coordinatorActive)
+    } finally {
+      this.draining.delete(ruleId)
     }
-    const globalAvailable = Math.max(0, this.taskboard.config.maxGlobalWorkers - this.inFlight.size)
-    const projectRunning = this.runningByProject.get(rule.projectId) ?? 0
-    const projectAvailable = Math.max(0, this.taskboard.config.maxProjectWorkers - projectRunning)
-    const ruleAvailable = Math.max(0, rule.config.concurrencyLimit - projectRunning)
-    const slots = Math.min(globalAvailable, projectAvailable, ruleAvailable)
-    if (slots === 0) {
-      rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
-        kind: 'empty', message: 'worker concurrency is currently full', at: Date.now(),
-      }, Date.now() + rule.config.intervalMs)
-      this.schedule(rule)
-      return
-    }
-    const candidates = this.taskboard.provider.listTasks({ projectId: rule.projectId, statuses: ['todo'], limit: 500 })
-    if (candidates.length === 0) {
-      const pause = rule.config.autoPauseOnEmpty
-      rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
-        kind: 'empty', message: 'no eligible todo tasks', at: Date.now(),
-      }, pause ? undefined : Date.now() + rule.config.intervalMs, pause ? 'paused' : 'enabled')
-      this.schedule(rule)
-      return
-    }
-    let started = 0
-    let dependencyBlocked = 0
-    for (const task of candidates) {
-      if (started >= slots) break
-      try {
-        this.startWorker(rule, task)
-        started += 1
+  }
+
+  private async drain(
+    ruleId: string,
+    coordinatorActive: boolean,
+    options: { readonly preserveSchedule?: boolean; readonly scheduledAt?: number } = {},
+  ): Promise<void> {
+    const preserve = options.preserveSchedule === true
+    const kept = options.scheduledAt
+    while (this.draining.has(ruleId)) {
+      if (coordinatorActive && !this.running) return
+      let rule = this.taskboard.provider.getAutomation(ruleId)
+      if (!preserve && rule.state !== 'enabled') return
+      const quota = await this.quota.state(rule)
+      if (quota === 'uncertain' && rule.config.quotaPolicy === 'pause-on-uncertain') {
         rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
-          kind: 'claimed', taskId: task.id, message: `worker started for ${task.identifier}`, at: Date.now(),
-        }, Date.now() + rule.config.intervalMs)
-      } catch (error) {
-        if (error instanceof TaskboardError && error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
-        else throw error
+          kind: 'quota-paused', message: 'quota state is uncertain; no new claims started', at: Date.now(),
+        }, preserve ? kept : undefined, preserve ? undefined : 'paused')
+        if (!preserve) this.refresh(rule)
+        return
       }
-    }
-    if (started === 0) {
+      const inFlight = this.ruleInFlight(ruleId)
+      const slots = this.availableSlots(rule)
+      if (slots === 0) {
+        if (inFlight.size === 0) {
+          rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+            kind: 'empty', message: 'worker concurrency is currently full', at: Date.now(),
+          }, preserve ? kept : Date.now() + rule.config.intervalMs)
+          if (!preserve) this.schedule(rule)
+          return
+        }
+        await Promise.race(inFlight)
+        continue
+      }
+      const candidates = this.taskboard.provider.listTasks({ projectId: rule.projectId, statuses: ['todo'], limit: 500 })
+      if (candidates.length === 0) {
+        if (inFlight.size > 0) {
+          await Promise.allSettled([...inFlight])
+          continue
+        }
+        const pause = !preserve && rule.config.autoPauseOnEmpty
+        rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+          kind: 'empty', message: 'no eligible todo tasks', at: Date.now(),
+        }, preserve ? kept : (pause ? undefined : Date.now() + rule.config.intervalMs), pause ? 'paused' : preserve ? undefined : 'enabled')
+        if (!preserve) this.schedule(rule)
+        return
+      }
+      let started = 0
+      let dependencyBlocked = 0
+      for (const task of candidates) {
+        if (started >= slots) break
+        try {
+          this.startWorker(rule, task)
+          started += 1
+          rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+            kind: 'claimed', taskId: task.id, message: `worker started for ${task.identifier}`, at: Date.now(),
+          }, preserve ? kept : undefined)
+        } catch (error) {
+          if (error instanceof TaskboardError && error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
+          else throw error
+        }
+      }
+      if (started > 0) continue
+      if (inFlight.size > 0) {
+        await Promise.race(inFlight)
+        continue
+      }
       rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
         kind: dependencyBlocked > 0 ? 'dependency-blocked' : 'empty',
         message: dependencyBlocked > 0 ? 'todo tasks are waiting for dependencies' : 'no worker started',
         at: Date.now(),
-      }, Date.now() + rule.config.intervalMs)
+      }, preserve ? kept : Date.now() + rule.config.intervalMs)
+      if (!preserve) this.schedule(rule)
+      return
     }
-    this.schedule(rule)
+  }
+
+  private availableSlots(rule: AutomationRule): number {
+    const globalAvailable = Math.max(0, this.taskboard.config.maxGlobalWorkers - this.inFlight.size)
+    const projectRunning = this.runningByProject.get(rule.projectId) ?? 0
+    const projectAvailable = Math.max(0, this.taskboard.config.maxProjectWorkers - projectRunning)
+    const ruleAvailable = Math.max(0, rule.config.concurrencyLimit - projectRunning)
+    return Math.min(globalAvailable, projectAvailable, ruleAvailable)
+  }
+
+  private ruleInFlight(ruleId: string): Set<Promise<void>> {
+    const existing = this.inFlightByRule.get(ruleId)
+    if (existing !== undefined) return existing
+    const created = new Set<Promise<void>>()
+    this.inFlightByRule.set(ruleId, created)
+    return created
   }
 
   private startWorker(rule: AutomationRule, task: TaskboardTask): void {
     const projectId = String(rule.projectId)
+    const ruleId = String(rule.id)
     this.runningByProject.set(projectId, (this.runningByProject.get(projectId) ?? 0) + 1)
     let run: Promise<void>
     try {
@@ -160,13 +228,15 @@ export class TaskboardAutomationCoordinator {
       if (latest.state === 'enabled') {
         this.taskboard.provider.recordAutomationDecision(latest.id, latest.version, {
           kind: 'error', taskId: task.id, message: error instanceof Error ? error.message : String(error), at: Date.now(),
-        }, Date.now() + latest.config.intervalMs)
+        }, latest.nextEligibleAt)
       }
     }).finally(() => {
       this.inFlight.delete(tracked)
+      this.ruleInFlight(ruleId).delete(tracked)
       this.decrement(projectId)
     })
     this.inFlight.add(tracked)
+    this.ruleInFlight(ruleId).add(tracked)
   }
 
   private decrement(projectId: string): void {

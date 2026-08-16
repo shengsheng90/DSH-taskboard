@@ -58,6 +58,18 @@ function requiredText(value: string, label: string): string {
   return value.trim()
 }
 
+function rewriteLabels(labels: readonly string[], from: string, to: string | undefined): string[] {
+  const next: string[] = []
+  const seen = new Set<string>()
+  for (const label of labels) {
+    const mapped = label === from ? to : label
+    if (mapped === undefined || mapped === '' || seen.has(mapped)) continue
+    seen.add(mapped)
+    next.push(mapped)
+  }
+  return next
+}
+
 function projectKey(value: string): string {
   const key = requiredText(value, 'project key').toUpperCase()
   if (!/^[A-Z][A-Z0-9]{1,9}$/.test(key)) {
@@ -901,6 +913,98 @@ export class SqliteTaskboardProvider {
     })
   }
 
+  updateComment(
+    taskId: TaskboardTaskId,
+    expectedVersion: number,
+    commentId: string,
+    body: string,
+    actor: TaskboardActor,
+  ): TaskboardComment {
+    requireHuman(actor, 'update comment')
+    const content = requiredText(body, 'comment')
+    return this.transaction(() => {
+      this.mutableTask(taskId, expectedVersion)
+      const current = this.getComment(commentId)
+      if (current.taskId !== taskId) {
+        throw new TaskboardError('comment must belong to the same task', 'TASK_INVALID_INPUT', { commentId, taskId })
+      }
+      const timestamp = now()
+      const result = this.db.prepare('UPDATE comments SET body = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?')
+        .run(content, timestamp, commentId, current.version)
+      if (result.changes !== 1) throw new TaskboardError('comment version changed during mutation', 'TASK_STALE_VERSION')
+      this.bumpTaskVersion(taskId, expectedVersion, timestamp)
+      this.activity(taskId, 'comment.updated', actor, { commentId, body: current.body }, { commentId, body: content }, timestamp)
+      this.bumpRevision()
+      return this.getComment(commentId)
+    })
+  }
+
+  deleteComment(
+    taskId: TaskboardTaskId,
+    expectedVersion: number,
+    commentId: string,
+    actor: TaskboardActor,
+  ): TaskboardTask {
+    requireHuman(actor, 'delete comment')
+    const task = this.transaction(() => {
+      this.mutableTask(taskId, expectedVersion)
+      const current = this.getComment(commentId)
+      if (current.taskId !== taskId) {
+        throw new TaskboardError('comment must belong to the same task', 'TASK_INVALID_INPUT', { commentId, taskId })
+      }
+      const timestamp = now()
+      const attachments = this.db.prepare('SELECT id, storage_key, filename FROM attachments WHERE comment_id = ?').all(commentId) as Row[]
+      for (const attachment of attachments) {
+        this.queueAttachmentCleanup(String(attachment['storage_key']), 'owning comment deleted', timestamp)
+        this.db.prepare('DELETE FROM attachments WHERE id = ?').run(String(attachment['id']))
+      }
+      this.db.prepare('DELETE FROM comments WHERE id = ?').run(commentId)
+      this.bumpTaskVersion(taskId, expectedVersion, timestamp)
+      this.activity(taskId, 'comment.deleted', actor, { commentId, body: current.body }, undefined, timestamp)
+      this.bumpRevision()
+      return this.getTask(taskId)
+    })
+    this.retryAttachmentCleanup()
+    return task
+  }
+
+  renameProjectLabel(
+    projectId: TaskboardProjectId,
+    expectedVersion: number,
+    from: string,
+    to: string,
+    actor: TaskboardActor,
+  ): TaskboardProject {
+    requireHuman(actor, 'rename project label')
+    const source = requiredText(from, 'label')
+    const target = requiredText(to, 'label')
+    if (source === target) throw new TaskboardError('renamed label must change', 'TASK_INVALID_INPUT')
+    return this.transaction(() => {
+      const project = this.getProject(projectId)
+      this.expectVersion(project.version, expectedVersion, 'project')
+      const timestamp = now()
+      this.replaceProjectLabel(project, source, target, actor, timestamp)
+      return this.getProject(projectId)
+    })
+  }
+
+  removeProjectLabel(
+    projectId: TaskboardProjectId,
+    expectedVersion: number,
+    label: string,
+    actor: TaskboardActor,
+  ): TaskboardProject {
+    requireHuman(actor, 'remove project label')
+    const name = requiredText(label, 'label')
+    return this.transaction(() => {
+      const project = this.getProject(projectId)
+      this.expectVersion(project.version, expectedVersion, 'project')
+      const timestamp = now()
+      this.replaceProjectLabel(project, name, undefined, actor, timestamp)
+      return this.getProject(projectId)
+    })
+  }
+
   addRelation(sourceTaskId: TaskboardTaskId, expectedSourceVersion: number, targetTaskId: TaskboardTaskId, kind: RelationKind, actor: TaskboardActor): TaskboardRelation {
     if (sourceTaskId === targetTaskId) throw new TaskboardError('a task cannot relate to itself', 'TASK_RELATION_INVALID')
     return this.transaction(() => {
@@ -1242,6 +1346,35 @@ export class SqliteTaskboardProvider {
       throw new TaskboardError('task is claimed by another Session or has no active owner', 'TASK_FOREIGN_CLAIM', { taskId })
     }
     return claim
+  }
+
+  private getComment(commentId: string): TaskboardComment {
+    const row = this.db.prepare('SELECT * FROM comments WHERE id = ?').get(commentId) as Row | undefined
+    if (row === undefined) throw new TaskboardError(`comment ${commentId} was not found`, 'COMMENT_NOT_FOUND', { commentId })
+    return mapComment(row)
+  }
+
+  private replaceProjectLabel(
+    project: TaskboardProject,
+    from: string,
+    to: string | undefined,
+    actor: TaskboardActor,
+    timestamp: number,
+  ): void {
+    const nextProjectLabels = rewriteLabels(project.labels, from, to)
+    this.db.prepare('UPDATE projects SET labels_json = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?')
+      .run(json(nextProjectLabels), timestamp, project.id, project.version)
+    const rows = this.db.prepare('SELECT id, labels_json FROM tasks WHERE project_id = ?').all(project.id) as Row[]
+    for (const row of rows) {
+      const labels = parseJson<string[]>(row['labels_json'], 'task labels')
+      const next = rewriteLabels(labels, from, to)
+      if (labels.length === next.length && labels.every((label, index) => label === next[index])) continue
+      const taskId = TaskId(String(row['id']))
+      this.db.prepare('UPDATE tasks SET labels_json = ?, version = version + 1, updated_at = ? WHERE id = ?')
+        .run(json(next), timestamp, taskId)
+      this.activity(taskId, 'task.updated', actor, { labels }, { labels: next }, timestamp)
+    }
+    this.bumpRevision()
   }
 
   private insertComment(taskId: TaskboardTaskId, body: string, actor: TaskboardActor, timestamp: number): TaskboardComment {

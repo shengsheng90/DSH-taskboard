@@ -66,6 +66,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.inject(['agents', 'goals', 'workspaceRegistry', 'agentPresets', 'agentDefaultModel'], (nativeCtx) => {
     const worker = new HarnessTaskboardWorker(nativeCtx, service)
     const automation = new TaskboardAutomationCoordinator(service, worker)
+    service.bindAutomation(automation)
     nativeCtx.effect(() => {
       let stopping = false
       void worker.reconcile().then(

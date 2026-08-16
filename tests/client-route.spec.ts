@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyRevisionChange, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController } from '../src/client/controller.js'
+import { applyAutomationDefaults, classifyRevisionChange, createdTaskId, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -14,6 +14,20 @@ test('Taskboard deep links preserve project, view, and task identity', () => {
 test('unknown views fall back to board and unrelated hashes close the page', () => {
   assert.deepEqual(decodeTaskboardHash('#taskboard/-/unknown'), { open: true, view: 'board' })
   assert.deepEqual(decodeTaskboardHash('#session/one'), { open: false, view: 'board' })
+})
+
+test('labels view round-trips in the Taskboard hash and groups tasks by catalog label', () => {
+  const route = { open: true, projectId: 'project-one', view: 'labels' as const }
+  assert.equal(encodeTaskboardRoute(route), '#taskboard/project-one/labels')
+  assert.deepEqual(decodeTaskboardHash('#taskboard/project-one/labels'), route)
+  const tasks = [
+    { labels: ['bug', 'ui'] },
+    { labels: ['ui'] },
+    { labels: [] },
+  ]
+  assert.deepEqual(projectLabelCatalog(['release'], tasks), ['release', 'bug', 'ui'])
+  assert.equal(tasksForLabel(tasks, 'ui').length, 2)
+  assert.equal(tasksForLabel(tasks, undefined).length, 1)
 })
 
 test('recent project restores a project-less Taskboard route without overriding explicit deep links', () => {
@@ -115,6 +129,8 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(zh.save, '保存')
   assert.equal(zh.newSession, '在新会话中打开')
   assert.equal(zh.write, '编写')
+  assert.equal(zh.descriptionPlaceholder, '使用 Markdown 编写任务详情')
+  assert.equal(zh.markdownToolbar, 'Markdown 工具栏')
   assert.equal(zh.openIssue, '打开')
   assert.equal(zh.closeIssue, '关闭任务')
   assert.equal(zh.urgent, '紧急')
@@ -123,17 +139,31 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(zh.low, '低')
   assert.equal(zh.none, '无')
   assert.equal(zh.automationLog, '自动化运行日志')
+  assert.equal(zh.more, '更多')
+  assert.equal(zh.modify, '修改')
+  assert.equal(zh.runNow, '立即执行')
+  assert.equal(zh.recentTasks, '最近任务')
   assert.equal(en.closeDetail, 'Close details')
   assert.equal(en.save, 'Save')
   assert.equal(en.write, 'Write')
   assert.equal(en.preview, 'Preview')
   assert.equal(en.edit, 'Edit')
+  assert.equal(en.mdBold, 'Bold')
   assert.equal(zh.edit, '编辑')
   assert.equal(en.openIssue, 'Open')
   assert.equal(en.closeIssue, 'Close issue')
   assert.equal(en.targetDate, 'Target date')
   assert.equal(en.urgent, 'Urgent')
   assert.equal(en.automationLog, 'Automation run log')
+  assert.equal(en.more, 'More')
+  assert.equal(en.modify, 'Modify')
+  assert.equal(en.runNow, 'Run now')
+  assert.equal(zh.unlabeled, '未标签')
+  assert.equal(zh.addLabel, '新建标签')
+  assert.equal(zh.edited, '已编辑')
+  assert.equal(en.unlabeled, 'No label')
+  assert.equal(en.renameLabel, 'Rename label')
+  assert.equal(en.edited, 'edited')
   assert.equal(zh.developmentContext, '开发上下文')
   assert.equal(zh.pauseUncertain, '配额不确定时暂停')
   assert.equal(en.newSession, 'Open in new session')
@@ -143,6 +173,47 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(formatAutomationLog(zh, { kind: 'claimed', taskId: 't1', message: 'worker started for DSH-2', at: 1 }, 'DSH-2 · Wire'), '读取待办并开始执行 DSH-2 · Wire')
   assert.equal(formatAutomationLog(zh, { kind: 'empty', message: 'no eligible todo tasks', at: 1 }), '已检查待办，当前没有可执行的任务')
   assert.equal(formatAutomationLog(en, { kind: 'empty', message: 'worker concurrency is currently full', at: 1 }), 'Workers are busy; no new task was started')
+})
+
+test('human quick-add creates a Todo task and only treats a mutation result with an id as success', () => {
+  assert.deepEqual(humanQuickCreateRequest('project-one', '  Wire the form  '), {
+    projectId: 'project-one',
+    title: 'Wire the form',
+    creator: 'human:web-client',
+    status: 'todo',
+  })
+  assert.equal(createdTaskId({ id: 'task-created', title: 'Wire the form' }), 'task-created')
+  assert.equal(createdTaskId({ title: 'missing id' }), undefined)
+  assert.equal(createdTaskId(undefined), undefined)
+})
+
+test('dashboard automation log keeps the newest ten entries and fills empty model fields from Host defaults', () => {
+  const runs = Array.from({ length: 12 }, (_, index) => ({ id: `run-${index}` }))
+  assert.deepEqual(previewAutomationRuns(runs), {
+    preview: runs.slice(0, 10),
+    remaining: 2,
+  })
+  assert.deepEqual(previewAutomationRuns(runs.slice(0, 3)), { preview: runs.slice(0, 3), remaining: 0 })
+  const emptyConfig = { intervalMs: 30_000, agentPreset: 'standard' }
+  assert.deepEqual(
+    applyAutomationDefaults(emptyConfig, {
+      modelRoute: 'deepseek-official:deepseek-v4-flash',
+      reasoning: 'low',
+    }),
+    {
+      intervalMs: 30_000,
+      agentPreset: 'standard',
+      modelRoute: 'deepseek-official:deepseek-v4-flash',
+      reasoning: 'low',
+    },
+  )
+  assert.deepEqual(
+    applyAutomationDefaults({ modelRoute: 'acme:large', reasoning: 'high' }, {
+      modelRoute: 'deepseek-official:deepseek-v4-flash',
+      reasoning: 'low',
+    }),
+    { modelRoute: 'acme:large', reasoning: 'high' },
+  )
 })
 
 test('client locale binding follows the Harness language source', () => {

@@ -5,7 +5,7 @@ import type {
   TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
 } from '../domain/index.js'
 
-export type TaskboardView = 'dashboard' | 'board' | 'list' | 'gantt' | 'workflows'
+export type TaskboardView = 'dashboard' | 'board' | 'list' | 'labels' | 'gantt' | 'workflows'
 
 export interface TaskboardRoute {
   readonly open: boolean
@@ -15,6 +15,45 @@ export interface TaskboardRoute {
 }
 
 export type RevisionChange = 'initial' | 'same' | 'next' | 'gap' | 'reset'
+
+export const AUTOMATION_LOG_PREVIEW_LIMIT = 10
+
+/** Keep the dashboard log short; the remainder opens in a dialog. */
+export function previewAutomationRuns<T>(runs: readonly T[], limit = AUTOMATION_LOG_PREVIEW_LIMIT): {
+  readonly preview: readonly T[]
+  readonly remaining: number
+} {
+  return { preview: runs.slice(0, limit), remaining: Math.max(0, runs.length - limit) }
+}
+
+/** Human quick-add from the web form: land in Todo so Overview and the board can show it. */
+export function humanQuickCreateRequest(projectId: string, title: string): {
+  readonly projectId: string
+  readonly title: string
+  readonly creator: 'human:web-client'
+  readonly status: 'todo'
+} {
+  return { projectId, title: title.trim(), creator: 'human:web-client', status: 'todo' }
+}
+
+/** Accept a create mutation result only when it carries a task id. */
+export function createdTaskId(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const id = (value as { id?: unknown }).id
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+/** Fill empty automation model fields from Host defaults without overwriting an explicit rule. */
+export function applyAutomationDefaults<T>(
+  config: T & { readonly modelRoute?: string; readonly reasoning?: string },
+  defaults: { readonly modelRoute?: string; readonly reasoning?: string } | undefined,
+): T & { readonly modelRoute?: string; readonly reasoning?: string } {
+  return {
+    ...config,
+    ...(config.modelRoute === undefined && defaults?.modelRoute !== undefined ? { modelRoute: defaults.modelRoute } : {}),
+    ...(config.reasoning === undefined && defaults?.reasoning !== undefined ? { reasoning: defaults.reasoning } : {}),
+  }
+}
 
 /** Classify bounded-snapshot revisions after events, reconnects, or a Host restart. */
 export function classifyRevisionChange(previous: number | undefined, next: number): RevisionChange {
@@ -50,7 +89,25 @@ export function boardDropIntent(
   }
 }
 
-const VIEWS = new Set<TaskboardView>(['dashboard', 'board', 'list', 'gantt', 'workflows'])
+/** Labels present on the project catalog or any task, in first-seen order. */
+export function projectLabelCatalog(projectLabels: readonly string[], tasks: readonly { readonly labels: readonly string[] }[]): string[] {
+  const seen = new Set<string>()
+  const catalog: string[] = []
+  for (const label of [...projectLabels, ...tasks.flatMap(task => task.labels)]) {
+    const name = label.trim()
+    if (name === '' || seen.has(name)) continue
+    seen.add(name)
+    catalog.push(name)
+  }
+  return catalog
+}
+
+/** Tasks that carry `label`, or unlabeled tasks when `label` is undefined. */
+export function tasksForLabel<T extends { readonly labels: readonly string[] }>(tasks: readonly T[], label: string | undefined): T[] {
+  return tasks.filter(task => label === undefined ? task.labels.length === 0 : task.labels.includes(label))
+}
+
+const VIEWS = new Set<TaskboardView>(['dashboard', 'board', 'list', 'labels', 'gantt', 'workflows'])
 const RECENT_PROJECT_KEY = 'dsh-taskboard.recent-project'
 
 /** Restore only an open project-less route; explicit deep links always win. */
