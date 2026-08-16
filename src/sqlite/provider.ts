@@ -6,7 +6,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
   ActivityId, AttachmentId, AutomationId, ClaimId, CommentId, ProjectId, RelationId, TaskId, TaskboardError, WorkflowId,
-  requireHuman, requireStatus,
+  parseTaskStatus, requireHuman, requireStatus,
 } from '../domain/index.js'
 import type {
   ClaimTaskRequest, CreateAttachmentRequest, CreateProjectRequest, CreateTaskRequest, DevelopmentContext,
@@ -14,7 +14,8 @@ import type {
   TaskStatus, TaskboardActivity, TaskboardActor, TaskboardAttachment, TaskboardClaim, TaskboardClaimId, TaskboardComment,
   TaskboardChangeEvent, TaskboardProject, TaskboardProjectId, TaskboardRelation, TaskboardTask,
   TaskboardStorageHealth, TaskboardTaskId, UpdateProjectRequest, UpdateTaskRequest, WorkflowDocument, SavedWorkflow,
-  AutomationActor, AutomationDecision, AutomationRule, AutomationRuleConfig, AutomationState, TaskboardAutomationId,
+  AutomationActor, AutomationDecision, AutomationRule, AutomationRuleConfig, AutomationRun, AutomationState,
+  TaskboardAutomationId,
 } from '../domain/index.js'
 import { openTaskboardDatabase, TASKBOARD_SCHEMA_VERSION } from './schema.js'
 
@@ -237,6 +238,17 @@ function mapAutomation(row: Row): AutomationRule {
     updatedAt: Number(row['updated_at']),
   }
 }
+
+function mapAutomationRun(row: Row): AutomationRun {
+  return {
+    id: String(row['id']),
+    ruleId: AutomationId(String(row['rule_id'])),
+    decision: parseJson<AutomationDecision>(row['decision_json'], 'automation run'),
+    createdAt: Number(row['created_at']),
+  }
+}
+
+const AUTOMATION_RUN_KEEP = 80
 
 /** Local transactional Taskboard authority backed by one SQLite database. */
 export class SqliteTaskboardProvider {
@@ -536,7 +548,12 @@ export class SqliteTaskboardProvider {
       requireStatus(current.status, ['in_progress'], 'submit for review')
       const claim = this.assertOwningClaim(taskId, actor)
       const timestamp = now()
-      this.insertComment(taskId, `${commentText}\n\nVerification: ${verificationText}`, actor, timestamp)
+      this.insertComment(
+        taskId,
+        verificationText === 'Completed' ? commentText : `${commentText}\n\nVerification: ${verificationText}`,
+        actor,
+        timestamp,
+      )
       this.db.prepare("UPDATE task_claims SET state = 'submitted', updated_at = ? WHERE id = ?").run(timestamp, claim.id)
       this.writeStatus(taskId, expectedVersion, 'in_review', timestamp)
       this.activity(taskId, 'task.review-submitted', actor, { status: current.status }, { status: 'in_review', claimId: claim.id }, timestamp)
@@ -579,6 +596,41 @@ export class SqliteTaskboardProvider {
   accept(taskId: TaskboardTaskId, expectedVersion: number, actor: TaskboardActor): TaskboardTask {
     requireHuman(actor, 'accept')
     return this.transition(taskId, expectedVersion, ['in_review'], 'done', 'task.accepted', actor)
+  }
+
+  /** Human board/detail status move; releases an in-progress claim when leaving that column. */
+  moveStatus(
+    taskId: TaskboardTaskId,
+    expectedVersion: number,
+    status: TaskStatus,
+    actor: TaskboardActor,
+    sortOrder?: number,
+  ): TaskboardTask {
+    requireHuman(actor, 'move status')
+    const target = parseTaskStatus(status)
+    if (sortOrder !== undefined && !Number.isFinite(sortOrder)) {
+      throw new TaskboardError('sort order must be a finite number', 'TASK_INVALID_INPUT')
+    }
+    return this.transaction(() => {
+      const current = this.mutableTask(taskId, expectedVersion)
+      if (current.status === target && sortOrder === undefined) {
+        throw new TaskboardError('task update contains no fields', 'TASK_INVALID_INPUT')
+      }
+      const timestamp = now()
+      if (current.status === 'in_progress' && target !== 'in_progress') {
+        this.db.prepare("UPDATE task_claims SET state = 'released', updated_at = ? WHERE task_id = ? AND state IN ('active','orphaned')")
+          .run(timestamp, taskId)
+      }
+      const result = sortOrder === undefined
+        ? this.db.prepare('UPDATE tasks SET status = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?')
+          .run(target, timestamp, taskId, expectedVersion)
+        : this.db.prepare('UPDATE tasks SET status = ?, sort_order = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?')
+          .run(target, sortOrder, timestamp, taskId, expectedVersion)
+      if (result.changes !== 1) throw new TaskboardError('task version changed during transition', 'TASK_STALE_VERSION')
+      this.activity(taskId, 'task.status-moved', actor, { status: current.status }, { status: target }, timestamp)
+      this.bumpRevision()
+      return this.getTask(taskId)
+    })
   }
 
   block(taskId: TaskboardTaskId, expectedVersion: number, reason: string, actor: TaskboardActor): TaskboardTask {
@@ -1030,6 +1082,18 @@ export class SqliteTaskboardProvider {
     return (rows as Row[]).map(mapAutomation)
   }
 
+  listAutomationRuns(projectId: TaskboardProjectId, limit = 50): AutomationRun[] {
+    const rows = this.db.prepare(`
+      SELECT r.id, r.rule_id, r.decision_json, r.created_at
+      FROM automation_runs r
+      INNER JOIN automation_rules a ON a.id = r.rule_id
+      WHERE a.project_id = ?
+      ORDER BY r.created_at DESC, r.rowid DESC
+      LIMIT ?
+    `).all(projectId, limit) as Row[]
+    return rows.map(mapAutomationRun)
+  }
+
   updateAutomation(
     automationId: TaskboardAutomationId,
     expectedVersion: number,
@@ -1071,6 +1135,13 @@ export class SqliteTaskboardProvider {
       `).run(json(decision), nextEligibleAt ?? null, state ?? current.state, timestamp, automationId, expectedVersion)
       this.db.prepare('INSERT INTO automation_runs(id, rule_id, decision_json, created_at) VALUES (?, ?, ?, ?)')
         .run(id('automation-run'), automationId, json(decision), timestamp)
+      const keep = this.db.prepare(
+        'SELECT id FROM automation_runs WHERE rule_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?',
+      ).all(automationId, AUTOMATION_RUN_KEEP) as Array<{ id: string }>
+      if (keep.length >= AUTOMATION_RUN_KEEP) {
+        this.db.prepare(`DELETE FROM automation_runs WHERE rule_id = ? AND id NOT IN (${keep.map(() => '?').join(',')})`)
+          .run(automationId, ...keep.map(row => row.id))
+      }
       this.bumpRevision()
       return this.getAutomation(automationId)
     })

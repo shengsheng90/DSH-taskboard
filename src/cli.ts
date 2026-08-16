@@ -4,7 +4,7 @@ import { basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   AutomationId, CommentId, ProjectId, SqliteTaskboardProvider, TASKBOARD_SCHEMA_VERSION, TaskId, TaskboardError,
-  WorkflowNodeRegistry,
+  WorkflowNodeRegistry, parseTaskStatus,
 } from './index.js'
 import type {
   AutomationRuleConfig, AutomationState, CreateTaskRequest, FreshClaimRequest, HumanActor, RelationKind, TaskStatus,
@@ -187,6 +187,12 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
       value = provider.approve(TaskId(required(options, 'task')), version(options), actor)
     } else if (group === 'task' && command === 'accept') {
       value = provider.accept(TaskId(required(options, 'task')), version(options), actor)
+    } else if (group === 'task' && command === 'move') {
+      const sortOrder = options.get('sort-order')
+      value = provider.moveStatus(
+        TaskId(required(options, 'task')), version(options), parseTaskStatus(required(options, 'status')), actor,
+        sortOrder === undefined ? undefined : Number(sortOrder),
+      )
     } else if (group === 'task' && command === 'return') {
       const target = workTarget(options)
       value = provider.returnForRework(

@@ -4,7 +4,7 @@ Every success is `{ "schemaVersion": 1, "value": ... }`. Every error includes th
 
 ```text
 project list|get|create|update|delete
-task list|get|create|update|approve|accept|return|block|resume|cancel|reopen|archive|restore|force-takeover|delete|comment
+task list|get|create|update|approve|accept|move|return|block|resume|cancel|reopen|archive|restore|force-takeover|delete|comment
 relation add|delete
 attachment list|add|download|delete
 workflow list|get|create|update|delete
@@ -17,6 +17,7 @@ Structured creates and updates accept JSON:
 ```sh
 dsh-taskboard task create --request-json '{"projectId":"project-...","title":"Ship","creator":"human:cli","priority":"high","dueDate":"2026-08-20"}'
 dsh-taskboard task update --task task-... --version 3 --request-json '{"labels":["release"],"recurrence":{"frequency":"weekly","interval":1}}'
+dsh-taskboard task move --task task-... --version 4 --status in_review
 dsh-taskboard project update --project project-... --version 2 --request-json '{"workspaceId":"workspace-1","labels":["local"]}'
 ```
 

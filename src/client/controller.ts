@@ -2,7 +2,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TaskboardSnapshot } from '../service/index.js'
 import type {
-  TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
+  TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
 } from '../domain/index.js'
 
 export type TaskboardView = 'dashboard' | 'board' | 'list' | 'gantt' | 'workflows'
@@ -22,6 +22,32 @@ export function classifyRevisionChange(previous: number | undefined, next: numbe
   if (next === previous) return 'same'
   if (next < previous) return 'reset'
   return next === previous + 1 ? 'next' : 'gap'
+}
+
+export type BoardDropIntent =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'reorder'; readonly taskId: string; readonly expectedVersion: number; readonly sortOrder: number }
+  | { readonly kind: 'move'; readonly taskId: string; readonly expectedVersion: number; readonly status: TaskStatus; readonly sortOrder?: number }
+
+/** Map a board drop onto reorder-within-column or a human status move. */
+export function boardDropIntent(
+  dragged: { readonly id: string; readonly status: TaskStatus; readonly version: number; readonly archivedAt?: number } | undefined,
+  targetStatus: TaskStatus,
+  target?: { readonly id: string; readonly sortOrder: number },
+): BoardDropIntent {
+  if (dragged === undefined || dragged.archivedAt !== undefined) return { kind: 'none' }
+  if (target !== undefined && dragged.id === target.id) return { kind: 'none' }
+  if (dragged.status === targetStatus) {
+    if (target === undefined) return { kind: 'none' }
+    return { kind: 'reorder', taskId: dragged.id, expectedVersion: dragged.version, sortOrder: target.sortOrder - 0.5 }
+  }
+  return {
+    kind: 'move',
+    taskId: dragged.id,
+    expectedVersion: dragged.version,
+    status: targetStatus,
+    ...(target === undefined ? {} : { sortOrder: target.sortOrder - 0.5 }),
+  }
 }
 
 const VIEWS = new Set<TaskboardView>(['dashboard', 'board', 'list', 'gantt', 'workflows'])
@@ -71,7 +97,7 @@ export function renderTaskSessionDraft(detail: TaskDetail): string {
     '',
     'Attachment references:', attachments,
     '',
-    'Use taskboard_get with the exact opaque id before any write. Claim only if eligible, verify the work, and submit it for human review. Never accept it as done.',
+    'Use taskboard_get with the exact opaque id before any write. Claim only if eligible, verify the work, and submit it for human review. Never modify the task description; write the final result as a comment. Never accept it as done.',
   ].join('\n')
 }
 

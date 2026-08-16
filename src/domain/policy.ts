@@ -1,7 +1,15 @@
 import { TaskboardError } from './error.js'
-import type { TaskStatus, TaskboardActor } from './types.js'
+import { TASK_STATUSES, type TaskStatus, type TaskboardActor } from './types.js'
 
-const HUMAN_ONLY = new Set(['approve', 'return', 'accept', 'resume', 'cancel', 'reopen', 'archive', 'restore', 'delete', 'force-reclaim'])
+const HUMAN_ONLY = new Set(['approve', 'return', 'accept', 'resume', 'cancel', 'reopen', 'archive', 'restore', 'delete', 'force-reclaim', 'move status'])
+
+/** Parse a UI/CLI status token into the closed Taskboard vocabulary. */
+export function parseTaskStatus(value: string): TaskStatus {
+  if (!(TASK_STATUSES as readonly string[]).includes(value)) {
+    throw new TaskboardError(`unknown task status ${value}`, 'TASK_INVALID_INPUT', { status: value })
+  }
+  return value as TaskStatus
+}
 
 /** Assert that an operation carries direct human authority. */
 export function requireHuman(actor: TaskboardActor, operation: string): asserts actor is Extract<TaskboardActor, { kind: 'human' }> {

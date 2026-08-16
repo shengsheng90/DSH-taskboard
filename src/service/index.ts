@@ -5,10 +5,10 @@ import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { Config } from '../index.js'
 import {
-  AutomationId, ProjectId, TaskId, TaskboardError,
+  AutomationId, ProjectId, TaskId, TaskboardError, parseTaskStatus,
 } from '../domain/index.js'
 import type {
-  AutomationRule, AutomationRuleConfig, AutomationState, CreateProjectRequest, CreateTaskRequest, HumanActor,
+  AutomationRule, AutomationRuleConfig, AutomationRun, AutomationState, CreateProjectRequest, CreateTaskRequest, HumanActor,
   FreshClaimRequest, RelationKind, SavedWorkflow, TaskboardProject, TaskboardProjectId, TaskboardTask, TaskboardTaskId,
   TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskboardSessionRuntime, TaskDetail,
   TaskboardStorageHealth, UpdateProjectRequest, UpdateTaskRequest,
@@ -51,6 +51,7 @@ export interface TaskboardSnapshot {
   readonly tasks: readonly TaskboardTask[]
   readonly workflows: readonly SavedWorkflow[]
   readonly automations: readonly AutomationRule[]
+  readonly automationRuns: readonly AutomationRun[]
   readonly workflowCatalog: readonly WorkflowCatalogEntry[]
   readonly workflowCapabilities: {
     readonly skills: readonly { readonly name: string; readonly description: string }[]
@@ -87,6 +88,13 @@ function integer(value: unknown, label: string): number {
     throw new TaskboardError(`${label} must be a positive integer`, 'TASK_INVALID_INPUT')
   }
   return value as number
+}
+
+function finiteNumber(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TaskboardError(`${label} must be a finite number`, 'TASK_INVALID_INPUT')
+  }
+  return value
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
@@ -250,6 +258,7 @@ export class TaskboardService extends TypertRemoteService {
       tasks: selected === undefined ? [] : this.provider.listTasks({ projectId: selected, includeArchived: true, limit: this.config.pageSize }),
       workflows: selected === undefined ? [] : this.provider.listWorkflows(selected),
       automations: selected === undefined ? [] : this.provider.listAutomations(selected),
+      automationRuns: selected === undefined ? [] : this.provider.listAutomationRuns(selected),
       workflowCatalog: this.workflowNodes.catalog(),
       workflowCapabilities: {
         skills: this.workflowSkills,
@@ -374,6 +383,11 @@ export class TaskboardService extends TypertRemoteService {
         return this.provider.approve(this.taskId(input), this.version(input), actor)
       case 'task.accept':
         return this.provider.accept(this.taskId(input), this.version(input), actor)
+      case 'task.move':
+        return this.provider.moveStatus(
+          this.taskId(input), this.version(input), parseTaskStatus(string(input['status'], 'status')), actor,
+          input['sortOrder'] === undefined ? undefined : finiteNumber(input['sortOrder'], 'sortOrder'),
+        )
       case 'task.return':
         return this.provider.returnForRework(
           this.taskId(input), this.version(input), this.workTarget(input),

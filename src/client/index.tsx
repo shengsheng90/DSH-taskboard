@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { FormEvent, RefObject } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import type { FormEvent, ReactNode, RefObject } from 'react'
 import type { ClientContext, ISessions, IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
@@ -7,16 +7,24 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {
-  AutomationRule, SavedWorkflow, TaskboardProject, TaskboardTask, TaskDetail as TaskDetailData, WorkflowDocument,
+  AutomationRule, AutomationRun, SavedWorkflow, TaskboardProject, TaskboardTask, TaskDetail as TaskDetailData,
+  WorkflowDocument,
 } from '../domain/index.js'
+import { TASK_STATUSES } from '../domain/index.js'
 import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { TaskboardClientController } from './controller.js'
+import { boardDropIntent, TaskboardClientController } from './controller.js'
+import {
+  bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, formatOpenedAt, priorityLabel,
+  subscribeTaskboardLocale, TASKBOARD_LOCALE_NS, taskboardLocales, taskboardStrings,
+  type TaskboardCopy, type TaskboardLocaleRuntime,
+} from './locales.js'
 import taskboardRemote from '../../generated/typert.remote-client.js'
 
-export const inject = ['slots', 'connection', 'sessions', 'workspaces', 'conversation', 'remote']
+export { bindTaskboardLocale, taskboardStrings } from './locales.js'
+export const inject = ['slots', 'connection', 'sessions', 'workspaces', 'conversation', 'remote', 'locale']
 
 interface InjectedProps {
   controller: TaskboardClientController
@@ -37,64 +45,109 @@ type WorkspaceOption = IWorkspaces['list']['getSnapshot'] extends () => infer St
   ? State extends { items: readonly (infer Item)[] } ? Item : never
   : never
 
-const copy = {
-  zh: {
-    taskboard: '任务板', close: '关闭任务板', newTask: '新建任务', title: '标题', description: '描述', create: '创建',
-    dashboard: '概览', board: '看板', list: '列表', gantt: '甘特', workflows: '工作流', other: '其他任务',
-    backlog: '待批准', todo: '待办', in_progress: '进行中', in_review: '待评审', blocked: '已阻塞', done: '已完成', canceled: '已取消',
-    empty: '暂无任务', refresh: '刷新', approve: '批准开工', accept: '验收完成', archive: '归档', restore: '恢复', save: '保存',
-    comment: '评论', addComment: '添加评论', project: '项目', addProject: '新建项目', projectName: '项目名称', projectKey: '项目代号',
-    due: '截止', priority: '优先级', loading: '正在读取本地任务数据…', workflowNote: '保存的可视化工作流与能力目录将在这里显示。', search: '搜索任务', allStatuses: '全部状态', deleteProject: '删除项目', editProject: '编辑项目', newSession: '在新会话中打开', workspaceRequired: '请先为项目映射 Workspace',
-    comments: '评论记录', activity: '活动', attachments: '附件', relations: '关系', sessions: '关联会话', automation: '自动化', enable: '启用', pause: '暂停', nextRun: '下次运行', lastDecision: '最近决策', addAutomation: '新建自动化', addWorkflow: '新建工作流', addStep: '添加步骤', designOnly: '仅设计', executable: '可执行', returnWork: '退回修改', openSession: '打开会话', storageHealth: '本地存储健康', healthy: '正常', degraded: '需处理', cleanupPending: '待清理附件', orphanedClaims: '孤儿认领', undo: '撤销上次编辑', today: '今天', showCompleted: '显示已完成', recurrence: '重复', noRecurrence: '不重复', interval: '间隔', until: '截止重复',
-    labels: '标签', workspaceId: 'Harness Workspace ID', blankGlobal: '留空表示全局项目', globalProject: '全局项目', workspace: 'Workspace', noProjectLabels: '无项目标签', tasksWord: '个任务', activeWord: '进行中', agentPreset: 'Agent 预设', modelRoute: '模型路由', reasoning: '推理强度', intervalSeconds: '间隔（秒）', workers: '工作器数', quota: '配额策略', pauseUncertain: '配额不确定时暂停', ignore: '忽略', autoPauseEmpty: '无任务时自动暂停', model: '模型', hostDefault: 'Host 默认', stayEnabled: '保持启用', status: '状态', ganttZoom: '甘特缩放', days30: '30 天', days90: '90 天', oneYear: '1 年', noDatedTasks: '暂无已排期任务', workflowName: '工作流名称', nodeKind: '节点类型', newTabName: '新标签页名称', triggerKind: '触发器类型', tab: '标签页', deleteWorkflow: '删除工作流', installedCapabilities: '已安装能力', skillDiscovery: 'Skill 发现', completeWord: '已完成', refreshing: '刷新中/不完整', skill: 'Skill', mcp: 'MCP', copy: '复制', trueLabel: '真', falseLabel: '假', assignee: '负责人', workflow: '工作流', developmentContext: '开发上下文', none: '无', branch: '分支', worktree: 'Worktree', worktreePath: 'Worktree 路径', start: '开始', daily: '每天', weekly: '每周', monthly: '每月', developmentRequired: '当前开发上下文需要分支和 Worktree 路径。', resume: '恢复', cancel: '取消', reopen: '重新打开', takeover: '强制接管', delete: '删除', confirm: '确认', reason: '原因', permanentlyDelete: '永久删除', participants: '参与者', creator: '创建者', actors: '操作者', attachComment: '附加到评论', relationKind: '关系类型', relatedTask: '关联任务', selectTask: '选择任务', add: '添加', bytes: '字节', current: '当前', offline: '离线',
-  },
-  en: {
-    taskboard: 'Taskboard', close: 'Close Taskboard', newTask: 'New task', title: 'Title', description: 'Description', create: 'Create',
-    dashboard: 'Dashboard', board: 'Board', list: 'List', gantt: 'Gantt', workflows: 'Workflows', other: 'Other Tasks',
-    backlog: 'Backlog', todo: 'Todo', in_progress: 'In progress', in_review: 'In review', blocked: 'Blocked', done: 'Done', canceled: 'Canceled',
-    empty: 'No tasks', refresh: 'Refresh', approve: 'Approve for work', accept: 'Accept', archive: 'Archive', restore: 'Restore', save: 'Save',
-    comment: 'Comment', addComment: 'Add comment', project: 'Project', addProject: 'New project', projectName: 'Project name', projectKey: 'Project key',
-    due: 'Due', priority: 'Priority', loading: 'Reading local task data…', workflowNote: 'Saved visual workflows and the capability catalog appear here.', search: 'Search tasks', allStatuses: 'All statuses', deleteProject: 'Delete project', editProject: 'Edit project', newSession: 'Open in new session', workspaceRequired: 'Map a Workspace to this project first',
-    comments: 'Comments', activity: 'Activity', attachments: 'Attachments', relations: 'Relations', sessions: 'Linked sessions', automation: 'Automation', enable: 'Enable', pause: 'Pause', nextRun: 'Next run', lastDecision: 'Last decision', addAutomation: 'New automation', addWorkflow: 'New workflow', addStep: 'Add step', designOnly: 'Design only', executable: 'Executable', returnWork: 'Return for rework', openSession: 'Open session', storageHealth: 'Local storage health', healthy: 'Healthy', degraded: 'Needs attention', cleanupPending: 'Pending attachment cleanup', orphanedClaims: 'Orphaned claims', undo: 'Undo last edit', today: 'Today', showCompleted: 'Show completed', recurrence: 'Recurrence', noRecurrence: 'None', interval: 'Interval', until: 'Repeat until',
-    labels: 'Labels', workspaceId: 'Harness Workspace ID', blankGlobal: 'Blank = global project', globalProject: 'Global project', workspace: 'Workspace', noProjectLabels: 'No project labels', tasksWord: 'tasks', activeWord: 'active', agentPreset: 'Agent preset', modelRoute: 'Model route', reasoning: 'Reasoning', intervalSeconds: 'Interval (seconds)', workers: 'Workers', quota: 'Quota', pauseUncertain: 'Pause when uncertain', ignore: 'Ignore', autoPauseEmpty: 'Auto-pause when empty', model: 'Model', hostDefault: 'host default', stayEnabled: 'stay enabled', status: 'Status', ganttZoom: 'Gantt zoom', days30: '30 days', days90: '90 days', oneYear: '1 year', noDatedTasks: 'No dated tasks', workflowName: 'Workflow name', nodeKind: 'Node kind', newTabName: 'New tab name', triggerKind: 'Trigger kind', tab: 'Tab', deleteWorkflow: 'Delete workflow', installedCapabilities: 'Installed capabilities', skillDiscovery: 'Skill discovery', completeWord: 'complete', refreshing: 'refreshing/incomplete', skill: 'Skill', mcp: 'MCP', copy: 'Copy', trueLabel: 'True', falseLabel: 'False', assignee: 'Assignee', workflow: 'Workflow', developmentContext: 'Development context', none: 'None', branch: 'Branch', worktree: 'Worktree', worktreePath: 'Worktree path', start: 'Start', daily: 'daily', weekly: 'weekly', monthly: 'monthly', developmentRequired: 'Branch and worktree path are required for the selected development context.', resume: 'Resume', cancel: 'Cancel', reopen: 'Reopen', takeover: 'Force takeover', delete: 'Delete', confirm: 'Confirm', reason: 'reason', permanentlyDelete: 'Permanently delete', participants: 'Participants', creator: 'Creator', actors: 'Actors', attachComment: 'Attach to comment', relationKind: 'Relation kind', relatedTask: 'Related task', selectTask: 'Select task', add: 'Add', bytes: 'bytes', current: 'current', offline: 'offline',
-  },
-} as const
-
-export function taskboardStrings(language: string) {
-  return language.toLowerCase().startsWith('zh') ? copy.zh : copy.en
+function useStrings(): TaskboardCopy {
+  return taskboardStrings(useSyncExternalStore(subscribeTaskboardLocale, currentTaskboardLanguage, currentTaskboardLanguage))
 }
 
-function strings() {
-  return taskboardStrings(typeof navigator === 'undefined' ? 'en' : navigator.language)
+/** Kanban glyph in the DSH filled-outline family (same optical weight as the settings gear). */
+function TaskboardIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M3.2 1.05H12.8A2.15 2.15 0 0 1 14.95 3.2V12.8A2.15 2.15 0 0 1 12.8 14.95H3.2A2.15 2.15 0 0 1 1.05 12.8V3.2A2.15 2.15 0 0 1 3.2 1.05ZM3.2 2.37H12.8A0.83 0.83 0 0 1 13.63 3.2V12.8A0.83 0.83 0 0 1 12.8 13.63H3.2A0.83 0.83 0 0 1 2.37 12.8V3.2A0.83 0.83 0 0 1 3.2 2.37Z"
+        fill="currentColor"
+      />
+      <path d="M4.56 3.52A0.64 0.64 0 0 1 5.2 4.16V11.84A0.64 0.64 0 0 1 4.56 12.48 0.64 0.64 0 0 1 3.92 11.84V4.16A0.64 0.64 0 0 1 4.56 3.52Z" fill="currentColor" />
+      <path d="M8 3.52A0.64 0.64 0 0 1 8.64 4.16V7.18A0.64 0.64 0 0 1 8 7.82 0.64 0.64 0 0 1 7.36 7.18V4.16A0.64 0.64 0 0 1 8 3.52Z" fill="currentColor" />
+      <path d="M11.44 3.52A0.64 0.64 0 0 1 12.08 4.16V9.33A0.64 0.64 0 0 1 11.44 9.97 0.64 0.64 0 0 1 10.8 9.33V4.16A0.64 0.64 0 0 1 11.44 3.52Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+/** Filled floppy-disk glyph so the primary Save action stays recognizable at small sizes. */
+function SaveIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M2.2 2.35c0-.58.47-1.05 1.05-1.05h7.15L14 3.9v9.75c0 .58-.47 1.05-1.05 1.05H3.25c-.58 0-1.05-.47-1.05-1.05V2.35Zm2.2.7v3.45h6.05V3.05H4.4Zm1.2.9h1.35v1.7H5.6V3.95ZM3.7 9.2v3.55h8.6V9.2H3.7Z" />
+    </svg>
+  )
+}
+
+/** 14px stroke X matching the Harness settings/modal close glyph. */
+function CloseIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function actorName(value: string): string {
+  return value.split(/[:/]/).pop() || value
+}
+
+function actorInitial(value: string): string {
+  return (actorName(value).trim().slice(0, 1) || '?').toUpperCase()
+}
+
+function isClosedStatus(status: TaskboardTask['status']): boolean {
+  return status === 'done' || status === 'canceled'
+}
+
+function ComposerTabs({ mode, onChange }: { mode: 'write' | 'preview'; onChange: (mode: 'write' | 'preview') => void }) {
+  const t = useStrings()
+  return (
+    <div className="dsh-taskboard-composer-tabs">
+      <button type="button" aria-current={mode === 'write' ? 'page' : undefined} onClick={() => { onChange('write') }}>{t.write}</button>
+      <button type="button" aria-current={mode === 'preview' ? 'page' : undefined} onClick={() => { onChange('preview') }}>{t.preview}</button>
+    </div>
+  )
+}
+
+function MetaField({ label, children, nested = false }: { label: string; children: ReactNode; nested?: boolean }) {
+  return (
+    <div className={nested ? 'dsh-taskboard-meta-field dsh-taskboard-meta-nested' : 'dsh-taskboard-meta-field'}>
+      <span>{label}</span>
+      <div>{children}</div>
+    </div>
+  )
 }
 
 export function TaskboardNavButton({ wide, controller }: NavProps) {
   const route = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
-  const t = strings()
+  const t = useStrings()
   return (
-    <button type="button" className="dsh-taskboard-nav" aria-pressed={route.open} aria-label={t.taskboard} onClick={() => { route.open ? controller.close() : controller.open() }}>
-      <span aria-hidden="true">▦</span>{wide && <span>{t.taskboard}</span>}
+    <button type="button" className={wide ? 'dsh-taskboard-nav' : 'dsh-taskboard-nav dsh-taskboard-nav-rail'} aria-pressed={route.open} aria-label={t.taskboard} onClick={() => { route.open ? controller.close() : controller.open() }}>
+      <TaskboardIcon size={wide ? 16 : 18} />{wide && <span className="dsh-taskboard-nav-label">{t.taskboard}</span>}
     </button>
   )
 }
 
-function useFrameInset(ref: RefObject<HTMLDivElement | null>, active: boolean): number {
-  const [inset, setInset] = useState(0)
+/** Resolve the sidebar/detail column widths so the page fills only the center column. */
+function useFrameInsets(ref: RefObject<HTMLDivElement | null>, active: boolean): { left: number; right: number } {
+  const [insets, setInsets] = useState({ left: 0, right: 0 })
   useEffect(() => {
     if (!active || ref.current === null) return
-    const frame = ref.current.parentElement?.parentElement
+    // DOM: page → [data-slot] anchor (display:contents) → shell.overlay layer → grid frame.
+    const frame = ref.current.parentElement?.parentElement?.parentElement
     if (frame === null || frame === undefined) return
     const measure = (): void => {
-      const first = getComputedStyle(frame).gridTemplateColumns.split(' ')[0]
-      const parsed = Number.parseFloat(first ?? '0')
-      setInset(Number.isFinite(parsed) ? parsed : 0)
+      const tracks = getComputedStyle(frame).gridTemplateColumns.split(' ')
+      const left = Number.parseFloat(tracks[0] ?? '0')
+      const right = Number.parseFloat(tracks[tracks.length - 1] ?? '0')
+      setInsets({
+        left: Number.isFinite(left) ? left : 0,
+        right: Number.isFinite(right) ? right : 0,
+      })
     }
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(frame)
     return () => { observer.disconnect() }
   }, [active, ref])
-  return inset
+  return insets
 }
 
 export function TaskboardPage({ controller, workspaces }: PageProps) {
@@ -105,7 +158,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
     workspaces.list.getSnapshot,
   )
   const root = useRef<HTMLDivElement>(null)
-  const inset = useFrameInset(root, route.open)
+  const insets = useFrameInsets(root, route.open)
   const [snapshot, setSnapshot] = useState<TaskboardSnapshot>()
   const [detail, setDetail] = useState<TaskDetailData>()
   const [busy, setBusy] = useState(false)
@@ -114,7 +167,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [undo, setUndo] = useState<{ endpoint: string; payload: Record<string, unknown> }>()
-  const t = strings()
+  const t = useStrings()
 
   useEffect(() => {
     if (!route.open) return
@@ -176,10 +229,18 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
 
   useEffect(() => {
     if (!route.open) return
-    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') controller.close() }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (route.taskId !== undefined) {
+        event.preventDefault()
+        controller.select(route.projectId, route.view)
+        return
+      }
+      controller.close()
+    }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey) }
-  }, [controller, route.open])
+  }, [controller, route.open, route.projectId, route.taskId, route.view])
 
   if (!route.open) return null
   const selected = snapshot?.projects.find(project => project.id === route.projectId) ?? snapshot?.projects[0]
@@ -228,17 +289,18 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   }
 
   return (
-    <div ref={root} className="dsh-taskboard-page" style={{ left: inset }} role="main" aria-label={t.taskboard}>
+    <div ref={root} className="dsh-taskboard-page" style={{ left: insets.left, right: insets.right }} role="main" aria-label={t.taskboard}>
       <style>{STYLES}</style>
       <header className="dsh-taskboard-header">
-        <div className="dsh-taskboard-brand"><span aria-hidden="true">▦</span><strong>{t.taskboard}</strong></div>
+        <div className="dsh-taskboard-brand"><TaskboardIcon size={16} /><strong>{t.taskboard}</strong></div>
         <select aria-label={t.project} value={selected?.id ?? ''} onChange={event => { controller.select(event.target.value || undefined, route.view) }}>
           {snapshot?.projects.map(project => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}
         </select>
         <ProjectCreate controller={controller} refresh={refresh} workspaces={workspaceState.items} />
         {selected !== undefined && <ProjectActions project={selected} controller={controller} refresh={refresh} workspaces={workspaceState.items} />}
         <button type="button" onClick={refresh}>{t.refresh}</button>
-        <button type="button" aria-label={t.close} onClick={() => { controller.close() }}>×</button>
+        {selected !== undefined && <AutomationActions project={selected} automations={snapshot?.automations ?? []} defaults={snapshot?.automationDefaults} mutate={mutate} />}
+        <button type="button" className="dsh-taskboard-icon-close" aria-label={t.close} onClick={() => { controller.close() }}><CloseIcon size={14} /></button>
       </header>
       <div className="dsh-taskboard-filters">
         <input aria-label={t.search} placeholder={t.search} value={query} onChange={event => { setQuery(event.target.value) }} />
@@ -258,15 +320,19 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         ? <div className="dsh-taskboard-loading">{t.loading}</div>
         : <div className="dsh-taskboard-content">
           <main className="dsh-taskboard-view">
-            <TaskCreate project={selected} mutate={mutate} />
-            {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} automations={snapshot?.automations ?? []} project={selected} defaults={snapshot?.automationDefaults} storage={snapshot?.storageHealth} mutate={mutate} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
-            {route.view === 'board' && <Board tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
-            {route.view === 'list' && <ListView tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
-            {route.view === 'gantt' && <Gantt tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
-            {route.view === 'workflows' && <WorkflowEditor project={selected} workflows={snapshot?.workflows ?? []} catalog={snapshot?.workflowCatalog ?? []} capabilities={snapshot?.workflowCapabilities} mutate={mutate} />}
+            {selected === undefined
+              ? <div className="dsh-taskboard-empty"><p>{t.noProject}</p><ProjectCreate controller={controller} refresh={refresh} workspaces={workspaceState.items} /></div>
+              : <>
+                <TaskCreate project={selected} mutate={mutate} />
+                {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
+                {route.view === 'board' && <Board tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
+                {route.view === 'list' && <ListView tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
+                {route.view === 'gantt' && <Gantt tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
+                {route.view === 'workflows' && <WorkflowEditor project={selected} workflows={snapshot?.workflows ?? []} catalog={snapshot?.workflowCatalog ?? []} capabilities={snapshot?.workflowCapabilities} mutate={mutate} />}
+              </>}
           </main>
-          {selectedTask !== undefined && <TaskDetail project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={() => { controller.select(selected?.id, route.view) }} />}
         </div>}
+      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={() => { controller.select(selected?.id, route.view) }} />}
     </div>
   )
 }
@@ -276,7 +342,7 @@ function ProjectCreate({ controller, refresh, workspaces }: {
   refresh: () => void
   workspaces: readonly WorkspaceOption[]
 }) {
-  const t = strings()
+  const t = useStrings()
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [key, setKey] = useState('')
@@ -305,7 +371,7 @@ function ProjectActions({ project, controller, refresh, workspaces }: {
   refresh: () => void
   workspaces: readonly WorkspaceOption[]
 }) {
-  const t = strings()
+  const t = useStrings()
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [name, setName] = useState(project.name)
@@ -334,7 +400,7 @@ function ProjectActions({ project, controller, refresh, workspaces }: {
 
 function TaskCreate({ project, mutate }: { project: TaskboardProject | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void> }) {
   const [title, setTitle] = useState('')
-  const t = strings()
+  const t = useStrings()
   const submit = (event: FormEvent): void => {
     event.preventDefault()
     if (project === undefined || title.trim() === '') return
@@ -343,17 +409,30 @@ function TaskCreate({ project, mutate }: { project: TaskboardProject | undefined
   return <form className="dsh-taskboard-create" onSubmit={submit}><input value={title} onChange={event => { setTitle(event.target.value) }} placeholder={t.newTask} aria-label={t.title} /><button type="submit" disabled={project === undefined}>{t.create}</button></form>
 }
 
-function Dashboard({ tasks, automations, project, defaults, storage, mutate, open }: {
+function Dashboard({ tasks, runs, project, storage, open }: {
   tasks: readonly TaskboardTask[]
-  automations: readonly AutomationRule[]
+  runs: readonly AutomationRun[]
   project: TaskboardProject | undefined
-  defaults: TaskboardSnapshot['automationDefaults'] | undefined
   storage: TaskboardSnapshot['storageHealth'] | undefined
-  mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void>
   open: (task: TaskboardTask) => void
 }) {
-  const t = strings()
+  const t = useStrings()
   const counts = useMemo(() => Object.fromEntries(tasks.map(task => task.status).map(status => [status, tasks.filter(task => task.status === status).length])), [tasks])
+  const dueTasks = useMemo(() => [...tasks]
+    .filter(task => task.dueDate !== undefined && task.status !== 'done' && task.status !== 'canceled')
+    .sort((left, right) => String(left.dueDate).localeCompare(String(right.dueDate)))
+    .slice(0, 8), [tasks])
+  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${project.workspaceId}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <section className="dsh-taskboard-storage" data-status={storage.status}><header><h2>{t.storageHealth}</h2><strong>{storage.status === 'ok' ? t.healthy : t.degraded}</strong></header><span>SQLite: {storage.integrity} · schema v{storage.schemaVersion} · revision {storage.globalRevision}</span><span>{storage.taskCount} {t.tasksWord} · {storage.attachmentCount} {t.attachments} · {storage.attachmentBytes} {t.bytes}</span><span>{t.cleanupPending}: {storage.cleanupPending} · {t.orphanedClaims}: {storage.orphanedClaims}</span></section>}<AutomationLog runs={runs} tasks={tasks} /></>
+}
+
+function AutomationActions({ project, automations, defaults, mutate }: {
+  project: TaskboardProject
+  automations: readonly AutomationRule[]
+  defaults: TaskboardSnapshot['automationDefaults'] | undefined
+  mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void>
+}) {
+  const t = useStrings()
+  const [open, setOpen] = useState(false)
   const [adding, setAdding] = useState(false)
   const [agentPreset, setAgentPreset] = useState(defaults?.agentPreset ?? 'standard')
   const [modelRoute, setModelRoute] = useState(defaults?.modelRoute ?? '')
@@ -363,13 +442,13 @@ function Dashboard({ tasks, automations, project, defaults, storage, mutate, ope
   const [concurrencyLimit, setConcurrencyLimit] = useState(1)
   const [quotaPolicy, setQuotaPolicy] = useState<'pause-on-uncertain' | 'ignore'>('pause-on-uncertain')
   const [autoPauseOnEmpty, setAutoPauseOnEmpty] = useState(false)
-  const dueTasks = useMemo(() => [...tasks]
-    .filter(task => task.dueDate !== undefined && task.status !== 'done' && task.status !== 'canceled')
-    .sort((left, right) => String(left.dueDate).localeCompare(String(right.dueDate)))
-    .slice(0, 8), [tasks])
+  useEffect(() => {
+    setAgentPreset(defaults?.agentPreset ?? 'standard')
+    setModelRoute(defaults?.modelRoute ?? '')
+  }, [defaults?.agentPreset, defaults?.modelRoute])
   const add = (event: FormEvent): void => {
     event.preventDefault()
-    if (project === undefined || agentPreset.trim() === '') return
+    if (agentPreset.trim() === '') return
     void mutate('automation.create', {
       projectId: project.id,
       config: {
@@ -379,11 +458,20 @@ function Dashboard({ tasks, automations, project, defaults, storage, mutate, ope
       },
     }).then(() => { setAdding(false) })
   }
-  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${project.workspaceId}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <section className="dsh-taskboard-storage" data-status={storage.status}><header><h2>{t.storageHealth}</h2><strong>{storage.status === 'ok' ? t.healthy : t.degraded}</strong></header><span>SQLite: {storage.integrity} · schema v{storage.schemaVersion} · revision {storage.globalRevision}</span><span>{storage.taskCount} {t.tasksWord} · {storage.attachmentCount} {t.attachments} · {storage.attachmentBytes} {t.bytes}</span><span>{t.cleanupPending}: {storage.cleanupPending} · {t.orphanedClaims}: {storage.orphanedClaims}</span></section>}<section className="dsh-taskboard-automation"><header><h2>{t.automation}</h2><button type="button" aria-expanded={adding} onClick={() => { setAdding(value => !value) }}>＋ {t.addAutomation}</button></header>{adding && <form className="dsh-taskboard-automation-form" onSubmit={add}><label>{t.agentPreset}<input value={agentPreset} onChange={event => { setAgentPreset(event.target.value) }} /></label><label>{t.modelRoute}<input value={modelRoute} onChange={event => { setModelRoute(event.target.value) }} /></label><label>{t.reasoning}<input value={reasoning} onChange={event => { setReasoning(event.target.value) }} /></label><label>{t.intervalSeconds}<input type="number" min={minimumIntervalSeconds} value={intervalSeconds} onChange={event => { setIntervalSeconds(Math.max(minimumIntervalSeconds, Number(event.target.value) || minimumIntervalSeconds)) }} /></label><label>{t.workers}<input type="number" min="1" value={concurrencyLimit} onChange={event => { setConcurrencyLimit(Math.max(1, Number(event.target.value) || 1)) }} /></label><label>{t.quota}<select value={quotaPolicy} onChange={event => { setQuotaPolicy(event.target.value as typeof quotaPolicy) }}><option value="pause-on-uncertain">{t.pauseUncertain}</option><option value="ignore">{t.ignore}</option></select></label><label><input type="checkbox" checked={autoPauseOnEmpty} onChange={event => { setAutoPauseOnEmpty(event.target.checked) }} />{t.autoPauseEmpty}</label><button type="submit">{t.create}</button><button type="button" onClick={() => { setAdding(false) }}>{t.close}</button></form>}{automations.length === 0 ? <p>{t.empty}</p> : automations.map(rule => <AutomationEditor key={rule.id} rule={rule} minimumIntervalSeconds={minimumIntervalSeconds} mutate={mutate} />)}</section></>
+  return <div className="dsh-taskboard-popover"><button type="button" aria-expanded={open} onClick={() => { setOpen(value => !value) }}>{t.automation}</button>{open && <div className="dsh-taskboard-automation-menu"><header><h2>{t.automation}</h2><button type="button" aria-expanded={adding} onClick={() => { setAdding(value => !value) }}>＋ {t.addAutomation}</button></header>{adding && <form className="dsh-taskboard-automation-form" onSubmit={add}><label>{t.agentPreset}<input value={agentPreset} onChange={event => { setAgentPreset(event.target.value) }} /></label><label>{t.modelRoute}<input value={modelRoute} onChange={event => { setModelRoute(event.target.value) }} /></label><label>{t.reasoning}<input value={reasoning} onChange={event => { setReasoning(event.target.value) }} /></label><label>{t.intervalSeconds}<input type="number" min={minimumIntervalSeconds} value={intervalSeconds} onChange={event => { setIntervalSeconds(Math.max(minimumIntervalSeconds, Number(event.target.value) || minimumIntervalSeconds)) }} /></label><label>{t.workers}<input type="number" min="1" value={concurrencyLimit} onChange={event => { setConcurrencyLimit(Math.max(1, Number(event.target.value) || 1)) }} /></label><label>{t.quota}<select value={quotaPolicy} onChange={event => { setQuotaPolicy(event.target.value as typeof quotaPolicy) }}><option value="pause-on-uncertain">{t.pauseUncertain}</option><option value="ignore">{t.ignore}</option></select></label><label><input type="checkbox" checked={autoPauseOnEmpty} onChange={event => { setAutoPauseOnEmpty(event.target.checked) }} />{t.autoPauseEmpty}</label><button type="submit">{t.create}</button><button type="button" onClick={() => { setAdding(false) }}>{t.close}</button></form>}{automations.length === 0 ? <p>{t.empty}</p> : automations.map(rule => <AutomationEditor key={rule.id} rule={rule} minimumIntervalSeconds={minimumIntervalSeconds} mutate={mutate} />)}</div>}</div>
+}
+
+function AutomationLog({ runs, tasks }: { runs: readonly AutomationRun[]; tasks: readonly TaskboardTask[] }) {
+  const t = useStrings()
+  return <section className="dsh-taskboard-log"><header><h2>{t.automationLog}</h2></header>{runs.length === 0 ? <p>{t.empty}</p> : <ol>{runs.map(run => {
+    const task = run.decision.taskId === undefined ? undefined : tasks.find(item => item.id === run.decision.taskId)
+    const label = task === undefined ? run.decision.taskId : `${task.identifier} · ${task.title}`
+    return <li key={run.id} data-kind={run.decision.kind}><time dateTime={new Date(run.createdAt).toISOString()}>{new Date(run.createdAt).toLocaleString()}</time><span>{formatAutomationLog(t, run.decision, label)}</span></li>
+  })}</ol>}</section>
 }
 
 function AutomationEditor({ rule, minimumIntervalSeconds, mutate }: { rule: AutomationRule; minimumIntervalSeconds: number; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void> }) {
-  const t = strings()
+  const t = useStrings()
   const [editing, setEditing] = useState(false)
   const [config, setConfig] = useState(rule.config)
   useEffect(() => { setConfig(rule.config) }, [rule.version])
@@ -392,7 +480,7 @@ function AutomationEditor({ rule, minimumIntervalSeconds, mutate }: { rule: Auto
     const { modelRoute, reasoning, ...required } = config
     update({ ...required, ...(key === 'modelRoute' && value !== '' ? { modelRoute: value } : {}), ...(key === 'reasoning' && value !== '' ? { reasoning: value } : {}), ...(key !== 'modelRoute' && modelRoute !== undefined ? { modelRoute } : {}), ...(key !== 'reasoning' && reasoning !== undefined ? { reasoning } : {}) })
   }
-  return <article><div><strong>{rule.config.agentPreset}</strong><span>{rule.state} · {rule.config.concurrencyLimit} {t.workers} · {rule.config.intervalMs / 1000}s</span></div><div><small>{t.nextRun}: {rule.nextEligibleAt === undefined ? '—' : new Date(rule.nextEligibleAt).toLocaleString()}</small><small>{t.lastDecision}: {rule.lastDecision?.kind ?? '—'} · {rule.lastDecision?.message ?? '—'}</small><small>{t.model}: {rule.config.modelRoute ?? t.hostDefault} · {t.reasoning}: {rule.config.reasoning ?? t.hostDefault} · {t.quota}: {rule.config.quotaPolicy} · {t.empty}: {rule.config.autoPauseOnEmpty ? t.pause : t.stayEnabled}</small></div><div><button type="button" onClick={() => { void mutate('automation.update', { automationId: rule.id, expectedVersion: rule.version, update: { state: rule.state === 'enabled' ? 'paused' : 'enabled' } }) }}>{rule.state === 'enabled' ? t.pause : t.enable}</button><button type="button" aria-expanded={editing} onClick={() => { setEditing(value => !value) }}>{t.save}</button></div>{editing && <form className="dsh-taskboard-automation-form" onSubmit={event => { event.preventDefault(); void mutate('automation.update', { automationId: rule.id, expectedVersion: rule.version, update: { config } }).then(() => { setEditing(false) }) }}><label>{t.agentPreset}<input value={config.agentPreset} onChange={event => { update({ ...config, agentPreset: event.target.value }) }} /></label><label>{t.modelRoute}<input value={config.modelRoute ?? ''} onChange={event => { setOptional('modelRoute', event.target.value.trim()) }} /></label><label>{t.reasoning}<input value={config.reasoning ?? ''} onChange={event => { setOptional('reasoning', event.target.value.trim()) }} /></label><label>{t.intervalSeconds}<input type="number" min={minimumIntervalSeconds} value={config.intervalMs / 1000} onChange={event => { update({ ...config, intervalMs: Math.max(minimumIntervalSeconds, Number(event.target.value) || minimumIntervalSeconds) * 1000 }) }} /></label><label>{t.workers}<input type="number" min="1" value={config.concurrencyLimit} onChange={event => { update({ ...config, concurrencyLimit: Math.max(1, Number(event.target.value) || 1) }) }} /></label><label>{t.quota}<select value={config.quotaPolicy} onChange={event => { update({ ...config, quotaPolicy: event.target.value as AutomationRule['config']['quotaPolicy'] }) }}><option value="pause-on-uncertain">{t.pauseUncertain}</option><option value="ignore">{t.ignore}</option></select></label><label><input type="checkbox" checked={config.autoPauseOnEmpty} onChange={event => { update({ ...config, autoPauseOnEmpty: event.target.checked }) }} />{t.autoPauseEmpty}</label><button type="submit" disabled={config.agentPreset.trim() === ''}>{t.save}</button><button type="button" onClick={() => { setEditing(false); setConfig(rule.config) }}>{t.close}</button></form>}</article>
+  return <article><div><strong>{rule.config.agentPreset}</strong><span>{rule.state === 'enabled' ? t.enabled : t.paused} · {rule.config.concurrencyLimit} {t.workers} · {rule.config.intervalMs / 1000}s</span></div><div><small>{t.nextRun}: {rule.nextEligibleAt === undefined ? '—' : new Date(rule.nextEligibleAt).toLocaleString()}</small><small>{t.lastDecision}: {rule.lastDecision === undefined ? '—' : formatAutomationLog(t, rule.lastDecision)}</small><small>{t.model}: {rule.config.modelRoute ?? t.hostDefault} · {t.reasoning}: {rule.config.reasoning ?? t.hostDefault} · {t.quota}: {rule.config.quotaPolicy} · {t.empty}: {rule.config.autoPauseOnEmpty ? t.pause : t.stayEnabled}</small></div><div><button type="button" onClick={() => { void mutate('automation.update', { automationId: rule.id, expectedVersion: rule.version, update: { state: rule.state === 'enabled' ? 'paused' : 'enabled' } }) }}>{rule.state === 'enabled' ? t.pause : t.enable}</button><button type="button" aria-expanded={editing} onClick={() => { setEditing(value => !value) }}>{t.save}</button></div>{editing && <form className="dsh-taskboard-automation-form" onSubmit={event => { event.preventDefault(); void mutate('automation.update', { automationId: rule.id, expectedVersion: rule.version, update: { config } }).then(() => { setEditing(false) }) }}><label>{t.agentPreset}<input value={config.agentPreset} onChange={event => { update({ ...config, agentPreset: event.target.value }) }} /></label><label>{t.modelRoute}<input value={config.modelRoute ?? ''} onChange={event => { setOptional('modelRoute', event.target.value.trim()) }} /></label><label>{t.reasoning}<input value={config.reasoning ?? ''} onChange={event => { setOptional('reasoning', event.target.value.trim()) }} /></label><label>{t.intervalSeconds}<input type="number" min={minimumIntervalSeconds} value={config.intervalMs / 1000} onChange={event => { update({ ...config, intervalMs: Math.max(minimumIntervalSeconds, Number(event.target.value) || minimumIntervalSeconds) * 1000 }) }} /></label><label>{t.workers}<input type="number" min="1" value={config.concurrencyLimit} onChange={event => { update({ ...config, concurrencyLimit: Math.max(1, Number(event.target.value) || 1) }) }} /></label><label>{t.quota}<select value={config.quotaPolicy} onChange={event => { update({ ...config, quotaPolicy: event.target.value as AutomationRule['config']['quotaPolicy'] }) }}><option value="pause-on-uncertain">{t.pauseUncertain}</option><option value="ignore">{t.ignore}</option></select></label><label><input type="checkbox" checked={config.autoPauseOnEmpty} onChange={event => { update({ ...config, autoPauseOnEmpty: event.target.checked }) }} />{t.autoPauseEmpty}</label><button type="submit" disabled={config.agentPreset.trim() === ''}>{t.save}</button><button type="button" onClick={() => { setEditing(false); setConfig(rule.config) }}>{t.close}</button></form>}</article>
 }
 
 function Board({ tasks, open, mutate }: {
@@ -400,41 +488,81 @@ function Board({ tasks, open, mutate }: {
   open: (task: TaskboardTask) => void
   mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void>
 }) {
-  const t = strings()
+  const t = useStrings()
   const [draggedId, setDraggedId] = useState<string>()
-  const columns = ['todo', 'in_progress', 'in_review'] as const
-  const other = tasks.filter(task => !columns.includes(task.status as never) || task.archivedAt !== undefined)
-  const reorder = (target: TaskboardTask): void => {
-    const dragged = tasks.find(task => task.id === draggedId)
+  const draggingRef = useRef(false)
+  const dragged = tasks.find(task => task.id === draggedId)
+  const applyDrop = (status: typeof TASK_STATUSES[number], target?: TaskboardTask): void => {
+    const intent = boardDropIntent(dragged, status, target)
     setDraggedId(undefined)
-    if (dragged === undefined || dragged.id === target.id || dragged.status !== target.status) return
-    void mutate('task.update', {
-      taskId: dragged.id,
-      expectedVersion: dragged.version,
-      request: { sortOrder: target.sortOrder - 0.5 },
-    })
+    if (intent.kind === 'reorder') {
+      void mutate('task.update', {
+        taskId: intent.taskId,
+        expectedVersion: intent.expectedVersion,
+        request: { sortOrder: intent.sortOrder },
+      })
+    } else if (intent.kind === 'move') {
+      void mutate('task.move', {
+        taskId: intent.taskId,
+        expectedVersion: intent.expectedVersion,
+        status: intent.status,
+        ...(intent.sortOrder === undefined ? {} : { sortOrder: intent.sortOrder }),
+      })
+    }
   }
-  return <><div className="dsh-taskboard-board">{columns.map(status => <section key={status}><h2>{t[status]} <small>{tasks.filter(task => task.status === status && task.archivedAt === undefined).length}</small></h2>{tasks.filter(task => task.status === status && task.archivedAt === undefined).map(task => <TaskCard key={task.id} task={task} open={open} drag={{ start: () => { setDraggedId(task.id) }, drop: () => { reorder(task) } }} />)}</section>)}</div><section className="dsh-taskboard-other"><h2>{t.other}</h2>{other.length === 0 ? <p>{t.empty}</p> : other.map(task => <TaskCard key={task.id} task={task} open={open} />)}</section></>
+  const archived = tasks.filter(task => task.archivedAt !== undefined)
+  return <>
+    <div className="dsh-taskboard-board">
+      {TASK_STATUSES.map(status => (
+        <section
+          key={status}
+          data-status={status}
+          onDragOver={event => { event.preventDefault() }}
+          onDrop={event => { event.preventDefault(); applyDrop(status) }}
+        >
+          <h2>
+            <i className="dsh-taskboard-status-dot" data-status={status} />
+            <span>{t[status]}</span>
+            <small>{tasks.filter(task => task.status === status && task.archivedAt === undefined).length}</small>
+          </h2>
+          {tasks.filter(task => task.status === status && task.archivedAt === undefined).map(task => (
+            <TaskCard
+              key={task.id}
+              task={task}
+              open={candidate => { if (!draggingRef.current) open(candidate) }}
+              drag={{
+                start: () => { draggingRef.current = true; setDraggedId(task.id) },
+                drop: () => { applyDrop(status, task) },
+                end: () => { setDraggedId(undefined); window.setTimeout(() => { draggingRef.current = false }, 0) },
+              }}
+            />
+          ))}
+        </section>
+      ))}
+    </div>
+    {archived.length > 0 && <section className="dsh-taskboard-other"><h2>{t.other}</h2>{archived.map(task => <TaskCard key={task.id} task={task} open={open} />)}</section>}
+  </>
 }
 
 function TaskCard({ task, open, drag }: {
   task: TaskboardTask
   open: (task: TaskboardTask) => void
-  drag?: { start: () => void; drop: () => void }
+  drag?: { start: () => void; drop: () => void; end?: () => void }
 }) {
-  return <button type="button" draggable={drag !== undefined} className="dsh-taskboard-card" onDragStart={drag?.start} onDragOver={event => { if (drag !== undefined) event.preventDefault() }} onDrop={drag?.drop} onClick={() => { open(task) }}><small>{task.identifier} · v{task.version}</small><strong>{task.title}</strong><span>{task.priority}{task.dueDate === undefined ? '' : ` · ${task.dueDate}`}</span></button>
+  const t = useStrings()
+  return <button type="button" draggable={drag !== undefined} className="dsh-taskboard-card" data-status={task.status} onDragStart={drag?.start} onDragEnd={drag?.end} onDragOver={event => { if (drag !== undefined) { event.preventDefault(); event.stopPropagation() } }} onDrop={event => { if (drag === undefined) return; event.preventDefault(); event.stopPropagation(); drag.drop() }} onClick={() => { open(task) }}><small>{task.identifier} · v{task.version}</small><strong>{task.title}</strong><span>{priorityLabel(t, task.priority)}{task.dueDate === undefined ? '' : ` · ${task.dueDate}`}</span></button>
 }
 
 function ListView({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: TaskboardTask) => void }) {
-  const t = strings()
+  const t = useStrings()
   const [sort, setSort] = useState<'identifier' | 'title' | 'status' | 'priority' | 'dueDate'>('identifier')
   const ordered = [...tasks].sort((left, right) => String(left[sort] ?? '').localeCompare(String(right[sort] ?? ''), undefined, { numeric: true }))
   const heading = (key: typeof sort, label: string) => <button type="button" onClick={() => { setSort(key) }}>{label}{sort === key ? ' ↑' : ''}</button>
-  return <div className="dsh-taskboard-table-wrap"><table><thead><tr><th>{heading('identifier', 'ID')}</th><th>{heading('title', t.title)}</th><th>{heading('status', t.status)}</th><th>{heading('priority', t.priority)}</th><th>{heading('dueDate', t.due)}</th></tr></thead><tbody>{ordered.map(task => <tr key={task.id} tabIndex={0} onClick={() => { open(task) }} onKeyDown={event => { if (event.key === 'Enter') open(task) }}><td>{task.identifier}</td><td>{task.title}</td><td>{t[task.status]}</td><td>{task.priority}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
+  return <div className="dsh-taskboard-table-wrap"><table><thead><tr><th>{heading('identifier', 'ID')}</th><th>{heading('title', t.title)}</th><th>{heading('status', t.status)}</th><th>{heading('priority', t.priority)}</th><th>{heading('dueDate', t.due)}</th></tr></thead><tbody>{ordered.map(task => <tr key={task.id} tabIndex={0} onClick={() => { open(task) }} onKeyDown={event => { if (event.key === 'Enter') open(task) }}><td>{task.identifier}</td><td>{task.title}</td><td>{t[task.status]}</td><td>{priorityLabel(t, task.priority)}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
 }
 
 function Gantt({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: TaskboardTask) => void }) {
-  const t = strings()
+  const t = useStrings()
   const [zoom, setZoom] = useState<'month' | 'quarter' | 'year'>('quarter')
   const [showCompleted, setShowCompleted] = useState(false)
   const [anchor, setAnchor] = useState(() => Date.now())
@@ -459,7 +587,7 @@ function WorkflowEditor({ project, workflows, catalog, capabilities, mutate }: {
   capabilities: TaskboardSnapshot['workflowCapabilities'] | undefined
   mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void>
 }) {
-  const t = strings()
+  const t = useStrings()
   const [selectedId, setSelectedId] = useState<string>()
   const selected = workflows.find(item => item.id === selectedId) ?? workflows[0]
   const [name, setName] = useState('')
@@ -529,12 +657,12 @@ function WorkflowEditor({ project, workflows, catalog, capabilities, mutate }: {
 }
 
 function WorkflowNodeCard({ node, tabId, edit, trigger = false }: { node: WorkflowDocument['tabs'][number]['trigger']; tabId: string; edit: (action: 'up' | 'down' | 'copy' | 'delete' | 'true' | 'false', tabId: string, nodeId: string) => void; trigger?: boolean }) {
-  const t = strings()
+  const t = useStrings()
   return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>Copy</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ True</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ False</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>True</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>False</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
 }
 
 function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, openSession, openNewSession, close }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<void>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void }) {
-  const t = strings()
+  const t = useStrings()
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
   const [priority, setPriority] = useState(task.priority)
@@ -550,14 +678,34 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
   const [developmentBranch, setDevelopmentBranch] = useState(task.developmentContext?.branch ?? '')
   const [worktreePath, setWorktreePath] = useState(task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : '')
   const [comment, setComment] = useState('')
+  const [descriptionMode, setDescriptionMode] = useState<'write' | 'preview'>('preview')
+  const [editingDescription, setEditingDescription] = useState(task.description.trim() === '')
+  const [commentMode, setCommentMode] = useState<'write' | 'preview'>('write')
   const [relationKind, setRelationKind] = useState<'parent' | 'blocks' | 'related'>('related')
   const [relationTarget, setRelationTarget] = useState('')
   const [pendingAction, setPendingAction] = useState<'' | 'return' | 'block' | 'reopen' | 'takeover'>('')
   const [actionReason, setActionReason] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
   const developmentInvalid = developmentKind === 'branch'
     ? developmentBranch.trim() === ''
     : developmentKind === 'worktree' && (developmentBranch.trim() === '' || worktreePath.trim() === '')
+  const dirty = title !== task.title
+    || description !== task.description
+    || priority !== task.priority
+    || labels !== task.labels.join(', ')
+    || (assignee.trim() || '') !== (task.assignee ?? '')
+    || (workflowId || '') !== (task.workflowId ?? '')
+    || developmentKind !== (task.developmentContext?.kind ?? '')
+    || developmentBranch !== (task.developmentContext?.branch ?? '')
+    || worktreePath !== (task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : '')
+    || startDate !== (task.startDate ?? '')
+    || dueDate !== (task.dueDate ?? '')
+    || recurrence !== (task.recurrence?.frequency ?? '')
+    || (recurrence !== '' && recurrenceInterval !== String(task.recurrence?.interval ?? 1))
+    || (recurrence !== '' && recurrenceUntil !== (task.recurrence?.until ?? ''))
+  const currentVersion = detail?.task.version ?? task.version
   useEffect(() => {
     setTitle(task.title); setDescription(task.description); setPriority(task.priority); setLabels(task.labels.join(', '))
     setStartDate(task.startDate ?? ''); setDueDate(task.dueDate ?? ''); setRecurrence(task.recurrence?.frequency ?? '')
@@ -565,13 +713,37 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
     setWorkflowId(task.workflowId ?? ''); setDevelopmentKind(task.developmentContext?.kind ?? ''); setDevelopmentBranch(task.developmentContext?.branch ?? '')
     setWorktreePath(task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : '')
     setComment(''); setPendingAction(''); setActionReason(''); setConfirmDelete(false)
-  }, [task])
+    setDescriptionMode('preview'); setEditingDescription(task.description.trim() === ''); setCommentMode('write')
+  }, [task.id])
+  useEffect(() => { dialogRef.current?.focus() }, [task.id])
+  const save = (): void => {
+    void mutate('task.update', {
+      taskId: task.id,
+      expectedVersion: currentVersion,
+      request: {
+        title, description, priority,
+        labels: labels.split(',').map(value => value.trim()).filter(Boolean),
+        assignee: assignee.trim() || null,
+        workflowId: workflowId || null,
+        developmentContext: developmentKind === ''
+          ? null
+          : developmentKind === 'branch'
+            ? { kind: 'branch', branch: developmentBranch.trim() }
+            : { kind: 'worktree', branch: developmentBranch.trim(), path: worktreePath.trim() },
+        startDate: startDate || null,
+        dueDate: dueDate || null,
+        recurrence: recurrence === ''
+          ? null
+          : { frequency: recurrence, interval: Math.max(1, Number.parseInt(recurrenceInterval, 10) || 1), ...(recurrenceUntil === '' ? {} : { until: recurrenceUntil }) },
+      },
+    })
+  }
   const runReasonAction = (): void => {
     const reason = actionReason.trim()
     if (reason === '' || pendingAction === '') return
     const endpoint = pendingAction === 'return' ? 'task.return' : pendingAction === 'block' ? 'task.block' : pendingAction === 'reopen' ? 'task.reopen' : 'task.force-takeover'
     const reasonKey = pendingAction === 'return' ? 'comment' : 'reason'
-    void mutate(endpoint, { taskId: task.id, expectedVersion: task.version, [reasonKey]: reason }).then(() => { setPendingAction(''); setActionReason('') })
+    void mutate(endpoint, { taskId: task.id, expectedVersion: currentVersion, [reasonKey]: reason }).then(() => { setPendingAction(''); setActionReason('') })
   }
   const taskLabel = (id: string): string => {
     const match = tasks.find(item => item.id === id)
@@ -582,51 +754,159 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
     if (relation.kind === 'parent') return relation.sourceTaskId === task.id ? `parent of · ${taskLabel(relation.targetTaskId)}` : `child of · ${taskLabel(relation.sourceTaskId)}`
     return relation.sourceTaskId === task.id ? `blocks · ${taskLabel(relation.targetTaskId)}` : `blocked by · ${taskLabel(relation.sourceTaskId)}`
   }
-  return <aside className="dsh-taskboard-detail" aria-label={task.identifier}>
-    <header><div><small>{task.identifier} · v{task.version}</small><h2>{task.title}</h2></div><button type="button" onClick={close}>×</button></header>
-    <label>{t.title}<input value={title} onChange={event => { setTitle(event.target.value) }} /></label>
-    <label>{t.description}<textarea value={description} onChange={event => { setDescription(event.target.value) }} /></label>
-    <MarkdownText value={description} />
-    <label>{t.priority}<select value={priority} onChange={event => { setPriority(event.target.value as TaskboardTask['priority']) }}>{(['urgent', 'high', 'medium', 'low', 'none'] as const).map(value => <option key={value} value={value}>{value}</option>)}</select></label>
-    <label>{t.labels}<input value={labels} onChange={event => { setLabels(event.target.value) }} /></label>
-    <label>{t.assignee}<input value={assignee} onChange={event => { setAssignee(event.target.value) }} /></label>
-    <label>{t.workflow}<select value={workflowId} onChange={event => { setWorkflowId(event.target.value) }}><option value="">—</option>{workflows.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-    <label>{t.developmentContext}<select value={developmentKind} onChange={event => { setDevelopmentKind(event.target.value as typeof developmentKind) }}><option value="">{t.none}</option><option value="branch">{t.branch}</option><option value="worktree">{t.worktree}</option></select></label>
-    {developmentKind !== '' && <label>{t.branch}<input value={developmentBranch} onChange={event => { setDevelopmentBranch(event.target.value) }} /></label>}
-    {developmentKind === 'worktree' && <label>{t.worktreePath}<input value={worktreePath} onChange={event => { setWorktreePath(event.target.value) }} /></label>}
-    <label>{t.start}<input type="date" value={startDate} onChange={event => { setStartDate(event.target.value) }} /></label>
-    <label>{t.due}<input type="date" value={dueDate} onChange={event => { setDueDate(event.target.value) }} /></label>
-    <label>{t.recurrence}<select value={recurrence} onChange={event => { setRecurrence(event.target.value as typeof recurrence) }}><option value="">{t.noRecurrence}</option><option value="daily">{t.daily}</option><option value="weekly">{t.weekly}</option><option value="monthly">{t.monthly}</option></select></label>
-    {recurrence !== '' && <><label>{t.interval}<input type="number" min="1" value={recurrenceInterval} onChange={event => { setRecurrenceInterval(event.target.value) }} /></label><label>{t.until}<input type="date" value={recurrenceUntil} onChange={event => { setRecurrenceUntil(event.target.value) }} /></label></>}
-    <button type="button" disabled={title.trim() === '' || developmentInvalid} title={developmentInvalid ? t.developmentRequired : undefined} onClick={() => { void mutate('task.update', { taskId: task.id, expectedVersion: task.version, request: { title, description, priority, labels: labels.split(',').map(value => value.trim()).filter(Boolean), assignee: assignee.trim() || null, workflowId: workflowId || null, developmentContext: developmentKind === '' ? null : developmentKind === 'branch' ? { kind: 'branch', branch: developmentBranch.trim() } : { kind: 'worktree', branch: developmentBranch.trim(), path: worktreePath.trim() }, startDate: startDate || null, dueDate: dueDate || null, recurrence: recurrence === '' ? null : { frequency: recurrence, interval: Math.max(1, Number.parseInt(recurrenceInterval, 10) || 1), ...(recurrenceUntil === '' ? {} : { until: recurrenceUntil }) } } }) }}>{t.save}</button>
-    <div className="dsh-taskboard-actions">
-      {task.status === 'backlog' && <button type="button" onClick={() => { void mutate('task.approve', { taskId: task.id, expectedVersion: task.version }) }}>{t.approve}</button>}
-      {task.status === 'in_review' && <><button type="button" onClick={() => { void mutate('task.accept', { taskId: task.id, expectedVersion: task.version }) }}>{t.accept}</button><button type="button" onClick={() => { setPendingAction('return') }}>{t.returnWork}</button></>}
-      {(task.status === 'todo' || task.status === 'in_progress') && <button type="button" onClick={() => { setPendingAction('block') }}>{t.blocked}</button>}
-      {task.status === 'blocked' && <button type="button" onClick={() => { void mutate('task.resume', { taskId: task.id, expectedVersion: task.version }) }}>{t.resume}</button>}
-      {(['backlog', 'todo', 'in_progress', 'in_review', 'blocked'] as const).includes(task.status as never) && <button type="button" onClick={() => { void mutate('task.cancel', { taskId: task.id, expectedVersion: task.version }) }}>{t.cancel}</button>}
-      {(task.status === 'done' || task.status === 'canceled') && <button type="button" onClick={() => { setPendingAction('reopen') }}>{t.reopen}</button>}
-      {detail?.activeClaim !== undefined && <button type="button" onClick={() => { setPendingAction('takeover') }}>{t.takeover}</button>}
-      {task.archivedAt === undefined ? <button type="button" onClick={() => { void mutate('task.archive', { taskId: task.id, expectedVersion: task.version }) }}>{t.archive}</button> : <button type="button" onClick={() => { void mutate('task.restore', { taskId: task.id, expectedVersion: task.version }) }}>{t.restore}</button>}
-      {task.archivedAt !== undefined && <button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>{t.delete}</button>}
+  const saveDisabled = title.trim() === '' || developmentInvalid
+  const closed = isClosedStatus(task.status)
+  const taskAttachments = detail?.attachments.filter(item => item.commentId === undefined) ?? []
+  const submitComment = (): void => {
+    if (comment.trim() === '') return
+    void mutate('task.comment', { taskId: task.id, expectedVersion: currentVersion, body: comment.trim() }).then(() => { setComment(''); setCommentMode('write') })
+  }
+  return (
+    <div className="dsh-taskboard-dialog-backdrop" onClick={event => { if (event.target === event.currentTarget) close() }}>
+      <div ref={dialogRef} className="dsh-taskboard-detail" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+        <header className="dsh-taskboard-detail-header">
+          <div className="dsh-taskboard-detail-heading">
+            <div className="dsh-taskboard-detail-meta">
+              <span className="dsh-taskboard-issue-badge" data-closed={closed ? 'true' : undefined}>
+                <i className="dsh-taskboard-status-dot" data-status={task.status} />
+                {closed ? t.closedIssue : t.openIssue}
+              </span>
+              <span className="dsh-taskboard-detail-path">{project?.key ?? t.project} · {task.identifier}</span>
+              <small>v{task.version} · {t[task.status]}</small>
+            </div>
+            <input id={titleId} className="dsh-taskboard-detail-title" value={title} aria-label={t.title} onChange={event => { setTitle(event.target.value) }} />
+            <div className="dsh-taskboard-detail-author">
+              <span className="dsh-taskboard-avatar" aria-hidden="true">{actorInitial(task.creator)}</span>
+              <span><strong>{actorName(task.creator)}</strong> {formatOpenedAt(task.createdAt, t)}</span>
+            </div>
+          </div>
+          <div className="dsh-taskboard-detail-toolbar">
+            <button type="button" className="dsh-taskboard-save" data-dirty={dirty ? 'true' : undefined} disabled={saveDisabled} title={developmentInvalid ? t.developmentRequired : undefined} onClick={save}>
+              <SaveIcon size={16} /><span>{t.save}</span>
+            </button>
+            <button type="button" className="dsh-taskboard-detail-close" aria-label={t.closeDetail} onClick={close}><CloseIcon size={14} /></button>
+          </div>
+        </header>
+        <div className="dsh-taskboard-detail-columns">
+          <div className="dsh-taskboard-detail-main">
+            <section className="dsh-taskboard-body" aria-label={t.description}>
+              {editingDescription
+                ? <>
+                    <ComposerTabs mode={descriptionMode} onChange={setDescriptionMode} />
+                    {descriptionMode === 'write'
+                      ? <textarea value={description} placeholder={t.description} onChange={event => { setDescription(event.target.value) }} />
+                      : <div className="dsh-taskboard-composer-preview">{description.trim() === '' ? <p>{t.empty}</p> : <MarkdownText value={description} />}</div>}
+                    <footer>
+                      <button type="button" className="dsh-taskboard-link" onClick={() => { setEditingDescription(false); setDescriptionMode('preview') }}>{t.preview}</button>
+                    </footer>
+                  </>
+                : <>
+                    <div className="dsh-taskboard-body-content">{description.trim() === '' ? <p className="dsh-taskboard-muted">{t.empty}</p> : <MarkdownText value={description} />}</div>
+                    <footer>
+                      <button type="button" className="dsh-taskboard-link" onClick={() => { setEditingDescription(true); setDescriptionMode('write') }}>{t.edit}</button>
+                    </footer>
+                  </>}
+            </section>
+            {taskAttachments.length > 0 && <section className="dsh-taskboard-timeline-block" aria-label={t.attachments}>{taskAttachments.map(item => <article key={item.id} className="dsh-taskboard-attachment-row"><button type="button" className="dsh-taskboard-link" onClick={() => { void download(item.id, item.filename) }}>{item.filename}</button><small>{item.contentType} · {item.byteSize} {t.bytes}</small><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: item.id }) }}>{t.delete}</button></article>)}</section>}
+            <ol className="dsh-taskboard-timeline">
+              {(detail?.comments ?? []).map(item =>
+                <li key={item.id} className="dsh-taskboard-timeline-comment">
+                    <span className="dsh-taskboard-avatar" aria-hidden="true">{actorInitial(item.authorId)}</span>
+                    <article>
+                      <header><strong>{actorName(item.authorId)}</strong><small>{new Date(item.createdAt).toLocaleString()}</small></header>
+                      <MarkdownText value={item.body} />
+                      <label className="dsh-taskboard-file-label">{t.attachComment}<input type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(file, item.id); event.target.value = '' }} /></label>
+                      {detail?.attachments.filter(attachment => attachment.commentId === item.id).map(attachment => <span key={attachment.id} className="dsh-taskboard-attachment-row"><button type="button" className="dsh-taskboard-link" onClick={() => { void download(attachment.id, attachment.filename) }}>{attachment.filename}</button><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: attachment.id }) }}>{t.delete}</button></span>)}
+                    </article>
+                  </li>)}
+            </ol>
+            {pendingAction !== '' && <div className="dsh-taskboard-reason"><label>{t.reason}<textarea autoFocus value={actionReason} onChange={event => { setActionReason(event.target.value) }} /></label><button type="button" className="dsh-taskboard-save" disabled={actionReason.trim() === ''} onClick={runReasonAction}>{t.confirm}</button><button type="button" onClick={() => { setPendingAction(''); setActionReason('') }}>{t.close}</button></div>}
+            {confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>{t.permanentlyDelete} {task.identifier}?</span><button type="button" onClick={() => { void mutate('task.delete', { taskId: task.id, expectedVersion: currentVersion }); setConfirmDelete(false) }}>{t.delete}</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}
+            <section className="dsh-taskboard-composer" aria-label={t.addComment}>
+              <h3>{t.addComment}</h3>
+              <ComposerTabs mode={commentMode} onChange={setCommentMode} />
+              {commentMode === 'write'
+                ? <textarea value={comment} placeholder={t.commentPlaceholder} onChange={event => { setComment(event.target.value) }} />
+                : <div className="dsh-taskboard-composer-preview">{comment.trim() === '' ? <p>{t.commentPlaceholder}</p> : <MarkdownText value={comment} />}</div>}
+              <footer>
+                <label className="dsh-taskboard-file-label">{t.attachFiles}<input type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(file); event.target.value = '' }} /></label>
+                <div className="dsh-taskboard-composer-actions">
+                  {task.status === 'backlog' && <button type="button" onClick={() => { void mutate('task.approve', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.approve}</button>}
+                  {task.status === 'in_review' && <button type="button" onClick={() => { void mutate('task.accept', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.accept}</button>}
+                  {task.status === 'blocked' && <button type="button" onClick={() => { void mutate('task.resume', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.resume}</button>}
+                  {(task.status === 'todo' || task.status === 'in_progress') && <button type="button" onClick={() => { void mutate('task.cancel', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.closeIssue}</button>}
+                  {(task.status === 'done' || task.status === 'canceled') && <button type="button" onClick={() => { setPendingAction('reopen') }}>{t.reopen}</button>}
+                  <button type="button" className="dsh-taskboard-save" disabled={comment.trim() === ''} onClick={submitComment}>{t.comment}</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+          <aside className="dsh-taskboard-detail-side">
+            <MetaField label={t.assignee}>
+              <input value={assignee} placeholder={t.noOne} onChange={event => { setAssignee(event.target.value) }} />
+            </MetaField>
+            <MetaField label={t.labels}>
+              <input value={labels} onChange={event => { setLabels(event.target.value) }} placeholder="local, release" />
+            </MetaField>
+            <section className="dsh-taskboard-meta-project">
+              <h3>{t.project}</h3>
+              <p>{project === undefined ? t.none : `${project.key} · ${project.name}`}</p>
+              <MetaField nested label={t.status}>
+                <select aria-label={t.status} value={task.status} onChange={event => {
+                  const status = event.target.value
+                  if (status === task.status) return
+                  void mutate('task.move', { taskId: task.id, expectedVersion: currentVersion, status })
+                }}>{TASK_STATUSES.map(status => <option key={status} value={status}>{t[status]}</option>)}</select>
+              </MetaField>
+              <MetaField nested label={t.priority}>
+                <select value={priority} onChange={event => { setPriority(event.target.value as TaskboardTask['priority']) }}>{(['urgent', 'high', 'medium', 'low', 'none'] as const).map(value => <option key={value} value={value}>{priorityLabel(t, value)}</option>)}</select>
+              </MetaField>
+              <MetaField nested label={t.workflow}>
+                <select value={workflowId} onChange={event => { setWorkflowId(event.target.value) }}><option value="">{t.none}</option>{workflows.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+              </MetaField>
+              <MetaField nested label={t.start}>
+                <input type="date" value={startDate} onChange={event => { setStartDate(event.target.value) }} />
+              </MetaField>
+              <MetaField nested label={t.targetDate}>
+                <input type="date" value={dueDate} onChange={event => { setDueDate(event.target.value) }} />
+              </MetaField>
+              <MetaField nested label={t.recurrence}>
+                <select value={recurrence} onChange={event => { setRecurrence(event.target.value as typeof recurrence) }}><option value="">{t.noRecurrence}</option><option value="daily">{t.daily}</option><option value="weekly">{t.weekly}</option><option value="monthly">{t.monthly}</option></select>
+                {recurrence !== '' && <><input type="number" min="1" aria-label={t.interval} value={recurrenceInterval} onChange={event => { setRecurrenceInterval(event.target.value) }} /><input type="date" aria-label={t.until} value={recurrenceUntil} onChange={event => { setRecurrenceUntil(event.target.value) }} /></>}
+              </MetaField>
+            </section>
+            <MetaField label={t.relations}>
+              <div className="dsh-taskboard-relation-create"><select aria-label={t.relationKind} value={relationKind} onChange={event => { setRelationKind(event.target.value as typeof relationKind) }}><option value="parent">parent</option><option value="blocks">blocks</option><option value="related">related</option></select><select aria-label={t.relatedTask} value={relationTarget} onChange={event => { setRelationTarget(event.target.value) }}><option value="">{t.selectTask}</option>{tasks.filter(item => item.id !== task.id && item.projectId === task.projectId).map(item => <option key={item.id} value={item.id}>{item.identifier} · {item.title}</option>)}</select><button type="button" disabled={relationTarget === ''} onClick={() => { void mutate('task.relation', { taskId: task.id, expectedVersion: currentVersion, targetTaskId: relationTarget, kind: relationKind }).then(() => { setRelationTarget('') }) }}>{t.add}</button></div>
+              {detail === undefined || detail.relations.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.relations.map(item => {
+                const sourceVersion = tasks.find(candidate => candidate.id === item.sourceTaskId)?.version
+                return <article key={item.id} className="dsh-taskboard-side-item"><strong>{relationLabel(item)}</strong><button type="button" disabled={sourceVersion === undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article>
+              })}
+            </MetaField>
+            <MetaField label={t.developmentContext}>
+              <select value={developmentKind} onChange={event => { setDevelopmentKind(event.target.value as typeof developmentKind) }}><option value="">{t.none}</option><option value="branch">{t.branch}</option><option value="worktree">{t.worktree}</option></select>
+              {developmentKind !== '' && <input value={developmentBranch} aria-label={t.branch} placeholder={t.branch} onChange={event => { setDevelopmentBranch(event.target.value) }} />}
+              {developmentKind === 'worktree' && <input value={worktreePath} aria-label={t.worktreePath} placeholder={t.worktreePath} onChange={event => { setWorktreePath(event.target.value) }} />}
+            </MetaField>
+            <MetaField label={t.sessions}>
+              <button type="button" disabled={project?.workspaceId === undefined} title={project?.workspaceId === undefined ? t.workspaceRequired : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
+              {detail === undefined || detail.claims.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.claims.map(item => {
+                const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
+                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" onClick={() => { openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
+              })}
+            </MetaField>
+            <div className="dsh-taskboard-actions">
+              {task.status === 'in_review' && <button type="button" onClick={() => { setPendingAction('return') }}>{t.returnWork}</button>}
+              {(task.status === 'todo' || task.status === 'in_progress') && <button type="button" onClick={() => { setPendingAction('block') }}>{t.blocked}</button>}
+              {(['backlog', 'in_review', 'blocked'] as const).includes(task.status as never) && <button type="button" onClick={() => { void mutate('task.cancel', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.closeIssue}</button>}
+              {detail?.activeClaim !== undefined && <button type="button" onClick={() => { setPendingAction('takeover') }}>{t.takeover}</button>}
+              {task.archivedAt === undefined ? <button type="button" onClick={() => { void mutate('task.archive', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.archive}</button> : <button type="button" onClick={() => { void mutate('task.restore', { taskId: task.id, expectedVersion: currentVersion }) }}>{t.restore}</button>}
+              {task.archivedAt !== undefined && <button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>{t.delete}</button>}
+            </div>
+          </aside>
+        </div>
+      </div>
     </div>
-    {pendingAction !== '' && <div className="dsh-taskboard-reason"><label>{t.reason}<textarea autoFocus value={actionReason} onChange={event => { setActionReason(event.target.value) }} /></label><button type="button" disabled={actionReason.trim() === ''} onClick={runReasonAction}>{t.confirm}</button><button type="button" onClick={() => { setPendingAction(''); setActionReason('') }}>{t.close}</button></div>}
-    {confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>{t.permanentlyDelete} {task.identifier}?</span><button type="button" onClick={() => { void mutate('task.delete', { taskId: task.id, expectedVersion: task.version }); setConfirmDelete(false) }}>{t.delete}</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}
-    <label>{t.comment}<textarea value={comment} onChange={event => { setComment(event.target.value) }} /></label>
-    <button type="button" disabled={comment.trim() === ''} onClick={() => { void mutate('task.comment', { taskId: task.id, expectedVersion: task.version, body: comment.trim() }).then(() => { setComment('') }) }}>{t.addComment}</button>
-    <label>{t.attachments}<input type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(file); event.target.value = '' }} /></label>
-    {detail !== undefined && <div className="dsh-taskboard-detail-sections">
-      <section><h3>{t.participants}</h3><p>{t.creator}: {task.creator}</p><p>{t.assignee}: {task.assignee ?? '—'}</p><p>{t.actors}: {[...new Set(detail.activities.map(item => item.actorId))].join(', ') || '—'}</p></section>
-      <section><h3>{t.comments}</h3>{detail.comments.length === 0 ? <p>{t.empty}</p> : detail.comments.map(item => <article key={item.id}><strong>{item.authorId}</strong><MarkdownText value={item.body} /><label>{t.attachComment}<input type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(file, item.id); event.target.value = '' }} /></label>{detail.attachments.filter(attachment => attachment.commentId === item.id).map(attachment => <span key={attachment.id}><button type="button" onClick={() => { void download(attachment.id, attachment.filename) }}>{attachment.filename}</button><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: task.version, attachmentId: attachment.id }) }}>{t.delete}</button></span>)}</article>)}</section>
-      <section><h3>{t.attachments}</h3>{detail.attachments.filter(item => item.commentId === undefined).length === 0 ? <p>{t.empty}</p> : detail.attachments.filter(item => item.commentId === undefined).map(item => <article key={item.id}><button type="button" onClick={() => { void download(item.id, item.filename) }}>{item.filename}</button><small>{item.contentType} · {item.byteSize} {t.bytes}</small><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: task.version, attachmentId: item.id }) }}>{t.delete}</button></article>)}</section>
-      <section><h3>{t.relations}</h3><div className="dsh-taskboard-relation-create"><select aria-label={t.relationKind} value={relationKind} onChange={event => { setRelationKind(event.target.value as typeof relationKind) }}><option value="parent">parent</option><option value="blocks">blocks</option><option value="related">related</option></select><select aria-label={t.relatedTask} value={relationTarget} onChange={event => { setRelationTarget(event.target.value) }}><option value="">{t.selectTask}</option>{tasks.filter(item => item.id !== task.id && item.projectId === task.projectId).map(item => <option key={item.id} value={item.id}>{item.identifier} · {item.title}</option>)}</select><button type="button" disabled={relationTarget === ''} onClick={() => { void mutate('task.relation', { taskId: task.id, expectedVersion: task.version, targetTaskId: relationTarget, kind: relationKind }).then(() => { setRelationTarget('') }) }}>{t.add}</button></div>{detail.relations.length === 0 ? <p>{t.empty}</p> : detail.relations.map(item => { const sourceVersion = tasks.find(candidate => candidate.id === item.sourceTaskId)?.version; return <article key={item.id}><strong>{relationLabel(item)}</strong><small>{item.sourceTaskId} → {item.targetTaskId}</small><button type="button" disabled={sourceVersion === undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article> })}</section>
-      <section><h3>{t.sessions}</h3><button type="button" disabled={project?.workspaceId === undefined} title={project?.workspaceId === undefined ? t.workspaceRequired : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>{detail.claims.length === 0 ? <p>{t.empty}</p> : detail.claims.map(item => {
-        const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
-        return <article key={item.id}><button type="button" onClick={() => { openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small>{(runtime?.todos ?? []).map((todo, index) => <span key={`${todo.content}-${index}`}>{todo.status}: {todo.content}</span>)}</article>
-      })}</section>
-      <section><h3>{t.activity}</h3>{detail.activities.map(item => <article key={item.id}><strong>{item.kind}</strong><small>{item.actorId} · {new Date(item.createdAt).toLocaleString()}</small></article>)}</section>
-    </div>}
-  </aside>
+  )
 }
 
 function MarkdownText({ value }: { value: string }) {
@@ -643,6 +923,9 @@ function MarkdownText({ value }: { value: string }) {
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   const connection = ctx.get('connection') as unknown as ConnectionHandle
   const remote = ctx.get('remote') as unknown as TypertClientRemote
+  const locale = ctx.get('locale') as unknown as TaskboardLocaleRuntime
+  const unbindLocale = bindTaskboardLocale(locale)
+  const unregisterCopy = locale.register(TASKBOARD_LOCALE_NS, taskboardLocales)
   const unmountRemote = await remote.$mount(taskboardRemote)
   ctx.inject(['remote.taskboard'], (remoteCtx) => {
     const sessions = remoteCtx.get('sessions') as unknown as ISessions
@@ -662,29 +945,69 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         return sessionId
       },
     )
-    remoteCtx.effect(() => () => { controller.dispose() }, 'taskboard client controller')
+    // Close the page when the user navigates to another Session: the shell's
+    // session navigation is store-based (not hash-based), so it never clears
+    // the Taskboard hash on its own.
+    const sessionList = sessions.list
+    let previousSession = sessionList.getSnapshot().current
+    const offSessions = sessionList.subscribe(() => {
+      const next = sessionList.getSnapshot().current
+      if (next !== previousSession) {
+        previousSession = next
+        if (controller.getSnapshot().open) controller.close()
+      }
+    })
+    remoteCtx.effect(() => () => { controller.dispose(); offSessions() }, 'taskboard client controller')
     const Nav = (props: PropsRuntime<'sidebar.footer.action'>) => <TaskboardNavButton {...props} controller={controller} />
     const Page = (props: PropsRuntime<'shell.overlay'>) => <TaskboardPage {...props} controller={controller} workspaces={workspaces} />
     remoteCtx.slots.inject('sidebar.footer.action', () => remoteCtx.slots.register({ name: 'sidebar.footer.action', id: 'taskboard.navigation' }, Nav))
     remoteCtx.slots.inject('shell.overlay', () => remoteCtx.slots.register({ name: 'shell.overlay', id: 'taskboard.page' }, Page))
   })
-  return unmountRemote
+  return async () => {
+    unbindLocale()
+    unregisterCopy()
+    await unmountRemote()
+  }
 }
 
 const STYLES = `
-.dsh-taskboard-nav{width:100%;min-height:36px;display:flex;align-items:center;gap:8px;padding:7px 10px;border:0;border-radius:9px;background:transparent;color:var(--dsw-alias-label-primary,#222);cursor:pointer;font:inherit}.dsh-taskboard-nav:hover,.dsh-taskboard-nav[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover,#e8e8e8)}
-.dsh-taskboard-filters{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-filters input{flex:1;min-width:120px;padding:7px 9px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:8px;background:transparent}.dsh-taskboard-filters select{padding:7px 9px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:8px;background:transparent}
-.dsh-taskboard-page{position:absolute;top:0;right:0;bottom:0;z-index:1;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#171717);font:14px/1.45 system-ui,sans-serif;border-left:1px solid var(--dsw-alias-border-l1,#ddd)}
-.dsh-taskboard-page button,.dsh-taskboard-page input,.dsh-taskboard-page textarea,.dsh-taskboard-page select{font:inherit;color:inherit}.dsh-taskboard-page button{cursor:pointer}.dsh-taskboard-header{height:58px;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-brand{display:flex;gap:8px;align-items:center;margin-right:auto;font-size:16px}.dsh-taskboard-header button,.dsh-taskboard-header select,.dsh-taskboard-tabs button,.dsh-taskboard-create button,.dsh-taskboard-detail button{border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:8px;background:var(--dsw-alias-button-elevated-fill,#f7f7f7);padding:7px 10px}.dsh-taskboard-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-tabs button[aria-current=page]{background:var(--dsw-alias-interactive-bg-hover,#e7efff);border-color:#6186d8}.dsh-taskboard-error{padding:8px 16px;background:#b4231820;color:#b42318}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-content{display:flex;flex:1;min-height:0}.dsh-taskboard-view{flex:1;min-width:0;overflow:auto;padding:16px}.dsh-taskboard-create{display:flex;gap:8px;margin-bottom:16px}.dsh-taskboard-create input{flex:1;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:8px;background:transparent}.dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:12px}.dsh-taskboard-dashboard strong{font-size:30px}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-board{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:10px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f6f6f6)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{font-size:14px;margin:0 0 10px}.dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:5px;margin-bottom:8px;padding:10px;text-align:left;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}.dsh-taskboard-card:hover{border-color:#6186d8}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd);text-align:left}.dsh-taskboard-table-wrap tbody tr{cursor:pointer}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,#eee)}.dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#eee);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:#5b7fc7}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:#cf222e55;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-detail{width:min(380px,42vw);box-sizing:border-box;overflow:auto;padding:16px;border-left:1px solid var(--dsw-alias-border-l1,#ddd);background:var(--dsw-specific-sidebar-fill,#fafafa)}.dsh-taskboard-detail header{display:flex;justify-content:space-between}.dsh-taskboard-detail h2{margin:4px 0 16px}.dsh-taskboard-detail label{display:flex;flex-direction:column;gap:5px;margin:12px 0;color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-detail input,.dsh-taskboard-detail textarea,.dsh-taskboard-detail select{padding:8px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:8px;background:var(--dsw-alias-bg-base,#fff)}.dsh-taskboard-detail textarea{min-height:90px;resize:vertical}.dsh-taskboard-actions{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}
-.dsh-taskboard-automation{margin-top:18px}.dsh-taskboard-automation>header,.dsh-taskboard-automation article{display:flex;align-items:center;gap:12px}.dsh-taskboard-automation>header{justify-content:space-between}.dsh-taskboard-automation article{padding:12px 0;border-top:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-automation article>div{display:flex;flex:1;flex-direction:column}.dsh-taskboard-automation article small,.dsh-taskboard-automation article span{color:var(--dsw-alias-label-secondary,#666)}
-.dsh-taskboard-storage{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;padding:12px;border:1px solid #1a7f3770;border-radius:10px;background:#dafbe160}.dsh-taskboard-storage[data-status=degraded]{border-color:#9a6700;background:#fff8c570}.dsh-taskboard-storage header{display:flex;flex:1 0 100%;align-items:center;justify-content:space-between}.dsh-taskboard-storage h2{margin:0;font-size:14px}.dsh-taskboard-storage span{color:var(--dsw-alias-label-secondary,#666)}
-.dsh-taskboard-workflows{display:grid;grid-template-columns:190px 1fr;min-height:420px;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:12px;overflow:hidden}.dsh-taskboard-workflows>aside{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--dsw-specific-sidebar-fill,#f6f6f6)}.dsh-taskboard-workflows>aside button{display:flex;justify-content:space-between;padding:9px;border:1px solid transparent;border-radius:7px;background:transparent;text-align:left}.dsh-taskboard-workflows>aside button.active{border-color:#6186d8;background:var(--dsw-alias-bg-base,#fff)}.dsh-taskboard-workflows>section{padding:14px;overflow:auto}.dsh-taskboard-workflows>section>header{display:flex;gap:8px}.dsh-taskboard-workflows>section>header input{flex:1;padding:8px}.dsh-taskboard-workflow-tabs{display:flex;gap:20px;padding:20px 0}.dsh-taskboard-workflow-tabs>article{min-width:240px}.dsh-taskboard-workflow-node{margin:8px 0;padding:11px;border:2px solid #9a6700;border-radius:10px;background:#fff8c5}.dsh-taskboard-workflow-node[data-execution=executable]{border-color:#1a7f37;background:#dafbe1}.dsh-taskboard-workflow-node>small{display:block;color:var(--dsw-alias-label-secondary,#666)}.dsh-taskboard-flow-line{height:20px;margin-left:28px;border-left:2px solid #aaa}.dsh-taskboard-branches{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.dsh-taskboard-workflows footer{display:flex;flex-wrap:wrap;gap:5px}.dsh-taskboard-workflows footer span{padding:3px 6px;border-radius:5px;background:#fff8c5;font-size:11px}.dsh-taskboard-workflows footer span[data-execution=executable]{background:#dafbe1}
-.dsh-taskboard-workflow-tabs>article>header{display:flex;align-items:center;justify-content:space-between}.dsh-taskboard-workflow-node-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.dsh-taskboard-workflow-node-actions button{padding:2px 5px;border:1px solid #9a670080;border-radius:4px;background:transparent;font-size:11px}
-.dsh-taskboard-capabilities{margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-capabilities h3{margin:0 0 5px}.dsh-taskboard-capabilities>div{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.dsh-taskboard-capabilities button{padding:4px 7px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent}
-.dsh-taskboard-detail-sections{margin-top:18px}.dsh-taskboard-detail-sections section{padding:10px 0;border-top:1px solid var(--dsw-alias-border-l1,#ddd)}.dsh-taskboard-detail-sections h3{margin:0 0 8px;font-size:13px}.dsh-taskboard-detail-sections article{display:flex;flex-direction:column;padding:7px 0}.dsh-taskboard-detail-sections article p{margin:3px 0;white-space:pre-wrap}.dsh-taskboard-detail-sections small{color:var(--dsw-alias-label-secondary,#666);overflow-wrap:anywhere}.dsh-taskboard-detail-sections section>button{display:block;width:100%;margin:4px 0;text-align:left;overflow-wrap:anywhere}
-.dsh-taskboard-markdown{overflow-wrap:anywhere}.dsh-taskboard-markdown p{white-space:pre-wrap}.dsh-taskboard-markdown pre{overflow:auto;padding:8px;border-radius:6px;background:#0000000d}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:700;cursor:pointer}
-.dsh-taskboard-popover{position:relative}.dsh-taskboard-popover>form,.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:10;display:flex;flex-direction:column;gap:8px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:10px;background:var(--dsw-alias-bg-base,#fff);box-shadow:0 8px 24px #0002}.dsh-taskboard-popover form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-popover form input,.dsh-taskboard-popover form select{padding:7px;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:7px;background:var(--dsw-alias-bg-base,#fff)}.dsh-taskboard-popover form div,.dsh-taskboard-inline-form{display:flex;gap:7px}.dsh-taskboard-confirm{position:relative;top:auto;right:auto;width:auto;margin:8px 0}.dsh-taskboard-reason{padding:10px;border:1px solid #9a670080;border-radius:8px;background:#fff8c560}.dsh-taskboard-relation-create{display:grid;grid-template-columns:auto 1fr auto;gap:5px}.dsh-taskboard-inline-form{align-items:end;padding:10px 0}.dsh-taskboard-inline-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-workflows>section>header{position:relative;flex-wrap:wrap}.dsh-taskboard-workflows>section>header input{min-width:120px}.dsh-taskboard-workflow-create{display:flex;flex-direction:column;gap:5px}.dsh-taskboard-workflow-create input{min-width:0;padding:7px}.dsh-taskboard-detail-sections article>span{display:flex;align-items:center;gap:5px}.dsh-taskboard-detail-sections article>span button:first-child{flex:1;text-align:left}
-.dsh-taskboard-summary,.dsh-taskboard-due{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:14px;border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:10px}.dsh-taskboard-summary h2,.dsh-taskboard-due h2{margin:0}.dsh-taskboard-due button{display:flex;justify-content:space-between;gap:12px;padding:8px;border:0;border-bottom:1px solid var(--dsw-alias-border-l2,#ddd);background:transparent;text-align:left}.dsh-taskboard-automation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;flex:1 0 100%;padding:10px 0}.dsh-taskboard-automation-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-automation-form label:has(input[type="checkbox"]){flex-direction:row;align-items:center}.dsh-taskboard-automation article{flex-wrap:wrap}.dsh-taskboard-automation article>div:last-of-type{display:flex;flex:0 0 auto;flex-direction:row;gap:6px}
-@media(max-width:900px){.dsh-taskboard-page{left:0!important}.dsh-taskboard-dashboard{grid-template-columns:repeat(2,1fr)}.dsh-taskboard-board{grid-template-columns:1fr}.dsh-taskboard-detail{position:absolute;inset:58px 0 0 auto;width:min(440px,100%);z-index:3}.dsh-taskboard-header{gap:5px}.dsh-taskboard-header button{padding:6px}.dsh-taskboard-gantt button{grid-template-columns:1fr}}
+.dsh-taskboard-nav{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:34px;margin:4px 0;padding:6px 2px 6px 10px;box-sizing:border-box;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary,#0f1115);cursor:pointer;font:inherit;overflow:hidden}.dsh-taskboard-nav:hover,.dsh-taskboard-nav[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-nav-rail{flex:none;width:36px;height:36px;margin:8px 0 10px;justify-content:center;gap:0;padding:0;border-radius:50%}.dsh-taskboard-nav-label{overflow:hidden;white-space:nowrap}
+.dsh-taskboard-page{position:absolute;top:0;bottom:0;z-index:1;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:14px/22px system-ui,sans-serif;--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2,#d4d4d4);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2,#c4c4c4)}
+.dsh-taskboard-page button,.dsh-taskboard-page input,.dsh-taskboard-page textarea,.dsh-taskboard-page select{font:inherit;color:inherit}.dsh-taskboard-page button{cursor:pointer}.dsh-taskboard-page button:disabled{cursor:not-allowed;opacity:.4}
+.dsh-taskboard-page input,.dsh-taskboard-page textarea,.dsh-taskboard-page select{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}.dsh-taskboard-page input,.dsh-taskboard-page select{height:34px;padding:0 12px}.dsh-taskboard-page textarea{padding:8px 12px;min-height:90px;resize:vertical;line-height:22px}.dsh-taskboard-page input:focus,.dsh-taskboard-page textarea:focus,.dsh-taskboard-page select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,#0f1115)}.dsh-taskboard-page input::placeholder,.dsh-taskboard-page textarea::placeholder{color:var(--dsw-alias-label-dimmed,#e1e5ee)}
+.dsh-taskboard-header{flex:none;min-height:54px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-brand{display:flex;gap:8px;align-items:center;margin-right:auto;font-size:16px;line-height:24px;font-weight:500}
+.dsh-taskboard-header button,.dsh-taskboard-filters button,.dsh-taskboard-create button,.dsh-taskboard-gantt>header button,.dsh-taskboard-automation-menu button,.dsh-taskboard-popover>button,.dsh-taskboard-workflows>section>header button,.dsh-taskboard-workflow-create button,.dsh-taskboard-capabilities button,.dsh-taskboard-detail button,.dsh-taskboard-composer-actions button,.dsh-taskboard-actions button,.dsh-taskboard-reason button,.dsh-taskboard-confirm button,.dsh-taskboard-relation-create button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-height:36px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:18px;background:transparent}.dsh-taskboard-header button.dsh-taskboard-icon-close{width:28px;height:28px;min-width:28px;min-height:28px;padding:0;border:0;border-radius:28px}.dsh-taskboard-header button:hover:not(:disabled),.dsh-taskboard-filters button:hover:not(:disabled),.dsh-taskboard-create button:hover:not(:disabled),.dsh-taskboard-gantt>header button:hover:not(:disabled),.dsh-taskboard-automation-menu button:hover:not(:disabled),.dsh-taskboard-popover>button:hover:not(:disabled),.dsh-taskboard-workflows>section>header button:hover:not(:disabled),.dsh-taskboard-workflow-create button:hover:not(:disabled),.dsh-taskboard-capabilities button:hover:not(:disabled),.dsh-taskboard-detail button:hover:not(:disabled),.dsh-taskboard-composer-actions button:hover:not(:disabled),.dsh-taskboard-actions button:hover:not(:disabled),.dsh-taskboard-reason button:hover:not(:disabled),.dsh-taskboard-confirm button:hover:not(:disabled),.dsh-taskboard-relation-create button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.dsh-taskboard-header select,.dsh-taskboard-filters select,.dsh-taskboard-gantt>header select{height:36px;border-radius:18px}
+.dsh-taskboard-filters{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-filters input{flex:1;min-width:120px}
+.dsh-taskboard-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-tabs button{height:40px;padding:9px 16px 9px 12px;border:0;border-radius:12px;background:transparent}.dsh-taskboard-tabs button:hover{background:var(--dsw-specific-sidebar-nav-item-hover,#f1f3f5)}.dsh-taskboard-tabs button[aria-current=page]{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}
+.dsh-taskboard-error{padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-content{display:flex;flex:1;min-height:0}.dsh-taskboard-view{flex:1;min-width:0;overflow:auto;padding:16px 24px 24px}
+.dsh-taskboard-create{display:flex;gap:8px;margin-bottom:16px}.dsh-taskboard-create input{flex:1}
+.dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-dashboard strong{font-size:30px;line-height:38px;font-weight:500}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:12px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{display:flex;align-items:center;gap:8px;font-size:14px;line-height:22px;font-weight:500;margin:0 0 10px}.dsh-taskboard-board h2 small,.dsh-taskboard-other h2 small{margin-left:auto;color:var(--dsw-alias-label-tertiary,#81858c);font-weight:400}
+.dsh-taskboard-status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-status-dot[data-status=todo],.dsh-taskboard-status-dot[data-status=done]{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-status-dot[data-status=in_progress]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.dsh-taskboard-status-dot[data-status=in_review]{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-status-dot[data-status=blocked]{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-status-dot[data-status=canceled]{color:var(--dsw-alias-label-caption,#adb2b8)}.dsh-taskboard-status-dot[data-status=backlog]{color:var(--dsw-alias-label-tertiary,#81858c)}
+.dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
+.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-table-wrap tbody tr{cursor:pointer}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
+.dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-dialog-backdrop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.24));backdrop-filter:var(--dsw-mask-blur,blur(2px))}
+.dsh-taskboard-detail{width:min(1120px,100%);height:100%;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:0;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:24px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08));--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2,#d4d4d4);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2,#c4c4c4)}.dsh-taskboard-detail:focus{outline:none}
+.dsh-taskboard-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none;padding:20px 16px 12px 24px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-detail-heading{min-width:0;flex:1;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-detail-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.dsh-taskboard-detail-path{font-weight:500;color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-detail-meta small{color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-detail input.dsh-taskboard-detail-title{width:100%;height:auto;min-height:36px;padding:4px 0;border:0;border-radius:0;background:transparent;font-size:20px;line-height:28px;font-weight:500}.dsh-taskboard-detail input.dsh-taskboard-detail-title:focus{border:0;box-shadow:none;outline:none}.dsh-taskboard-detail-author{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-detail-author strong{color:var(--dsw-alias-label-primary,#0f1115);font-weight:500}.dsh-taskboard-detail-toolbar{display:flex;align-items:center;gap:8px;flex:none}
+.dsh-taskboard-issue-badge,.dsh-taskboard-status-pill,.dsh-taskboard-pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:12px;font-size:12px;line-height:18px;background:var(--dsw-alias-state-success-tertiary,#e6faed);color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-issue-badge[data-closed=true]{background:var(--dsw-alias-button-ghost-active-fill,#ebeef2);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-status-pill{background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-pill{background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-pill-row{display:flex;flex-wrap:wrap;gap:6px}.dsh-taskboard-avatar{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--dsw-alias-button-ghost-active-fill,#ebeef2);color:var(--dsw-alias-label-secondary,#61666b);font-size:12px;font-weight:500}.dsh-taskboard-muted{color:var(--dsw-alias-label-tertiary,#81858c);font-size:13px}
+.dsh-taskboard-save{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 14px;border:0;border-radius:18px;background:var(--dsw-alias-button-primary-fill,#0f1115);color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:500}.dsh-taskboard-detail button.dsh-taskboard-save{border:0;background:var(--dsw-alias-button-primary-fill,#0f1115);color:var(--dsw-alias-label-primary-foreground,#fff)}.dsh-taskboard-save svg{flex:none}.dsh-taskboard-save:hover:not(:disabled),.dsh-taskboard-detail button.dsh-taskboard-save:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,#43454a)}.dsh-taskboard-save[data-dirty=true]{box-shadow:0 0 0 3px var(--dsw-alias-interactive-bg-hover-accent,rgba(38,49,72,.14))}.dsh-taskboard-detail-close{width:28px;height:28px;min-height:28px;min-width:28px;padding:0;border:0;border-radius:28px;background:transparent;color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-detail button.dsh-taskboard-detail-close{width:28px;min-width:28px;height:28px;min-height:28px;padding:0;border:0;border-radius:28px}.dsh-taskboard-detail button.dsh-taskboard-detail-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.dsh-taskboard-detail-columns{display:grid;grid-template-columns:minmax(0,1fr) 296px;flex:1;min-height:0}.dsh-taskboard-detail-main{overflow:auto;padding:16px 24px 24px;display:flex;flex-direction:column;gap:16px}.dsh-taskboard-detail-side{overflow:auto;padding:4px 16px 24px;border-left:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}
+.dsh-taskboard-body,.dsh-taskboard-composer{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);overflow:hidden}.dsh-taskboard-body-content{padding:16px 16px 8px;min-height:72px}.dsh-taskboard-body>footer,.dsh-taskboard-composer>footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px 12px;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-composer h3{margin:0;padding:12px 14px 0;font-size:14px;line-height:22px;font-weight:500}.dsh-taskboard-composer-tabs{display:flex;gap:0;padding:8px 8px 0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-composer-tabs button{height:32px;min-height:32px;padding:0 12px;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:transparent;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-detail .dsh-taskboard-composer-tabs button{min-height:32px;border-radius:8px 8px 0 0}.dsh-taskboard-composer-tabs button[aria-current=page]{background:var(--dsw-alias-bg-layer-3,#fff);border-color:var(--dsw-alias-border-l2,rgba(0,0,0,.1));color:var(--dsw-alias-label-primary,#0f1115);margin-bottom:-1px}.dsh-taskboard-composer textarea,.dsh-taskboard-body textarea,.dsh-taskboard-composer-preview{margin:0;border:0;border-radius:0;min-height:120px;background:transparent}.dsh-taskboard-composer textarea:focus,.dsh-taskboard-body textarea:focus{border:0}.dsh-taskboard-composer-preview{padding:12px 14px}.dsh-taskboard-composer>footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 12px 12px;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-composer-actions{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}.dsh-taskboard-file-label{position:relative;display:inline-flex;align-items:center;gap:6px;margin:0;color:var(--dsw-alias-label-tertiary,#81858c);font-size:12px;cursor:pointer}.dsh-taskboard-file-label input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.dsh-taskboard-timeline{list-style:none;margin:0;padding:0 0 0 14px;display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-timeline-comment,.dsh-taskboard-timeline-event{position:relative;display:flex;gap:10px;padding-left:18px}.dsh-taskboard-timeline-comment .dsh-taskboard-avatar,.dsh-taskboard-timeline-mark{position:absolute;left:-15px;top:0}.dsh-taskboard-timeline-mark{width:10px;height:10px;margin-top:6px;border-radius:50%;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:inset 0 0 0 2px var(--dsw-alias-border-l3,rgba(0,0,0,.12))}.dsh-taskboard-timeline-comment article{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-timeline-comment article>header{display:flex;align-items:center;gap:8px;margin-bottom:6px}.dsh-taskboard-timeline-event p{margin:0;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-timeline-event small,.dsh-taskboard-timeline-comment small{margin-left:8px;color:var(--dsw-alias-label-tertiary,#81858c)}
+.dsh-taskboard-actions{display:flex;flex-wrap:wrap;gap:6px;margin:0}.dsh-taskboard-link{border:0;background:transparent;min-height:0;padding:0;border-radius:0;color:var(--dsw-alias-state-business-primary,#4176e6);text-align:left}.dsh-taskboard-detail button.dsh-taskboard-link{border:0;background:transparent;min-height:0;padding:0;border-radius:0;color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-attachment-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.dsh-taskboard-attachment-row small{color:var(--dsw-alias-label-tertiary,#81858c)}
+.dsh-taskboard-meta-field{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-meta-field>span{font-size:12px;line-height:16px;font-weight:500;color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-meta-field>div{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-meta-project{padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-meta-project h3{margin:0 0 4px;font-size:12px;line-height:16px;font-weight:500}.dsh-taskboard-meta-project>p{margin:0 0 8px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-meta-nested{padding:8px 0;border-bottom:0}.dsh-taskboard-meta-nested+.dsh-taskboard-meta-nested{border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-detail-side input,.dsh-taskboard-detail-side select{height:32px;border-color:transparent;background:transparent;padding-left:8px}.dsh-taskboard-detail-side input:hover,.dsh-taskboard-detail-side select:hover,.dsh-taskboard-detail-side input:focus,.dsh-taskboard-detail-side select:focus{border-color:var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-bg-layer-1,#fff)}.dsh-taskboard-detail-side .dsh-taskboard-actions{flex-direction:column;align-items:stretch;padding-top:12px}.dsh-taskboard-detail-side .dsh-taskboard-actions button{width:100%}.dsh-taskboard-side-item{display:flex;flex-direction:column;gap:4px;align-items:flex-start}.dsh-taskboard-side-item small{color:var(--dsw-alias-label-tertiary,#81858c);overflow-wrap:anywhere}
+.dsh-taskboard-automation-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:10;display:flex;flex-direction:column;gap:8px;width:min(520px,calc(100vw - 32px));max-height:min(70vh,640px);overflow:auto;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-automation-menu>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.dsh-taskboard-automation-menu h2{margin:0;font-size:14px;line-height:22px;font-weight:500}.dsh-taskboard-automation-menu article{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-automation-menu article>div{display:flex;flex:1;flex-direction:column}.dsh-taskboard-automation-menu article>div:last-of-type{display:flex;flex:0 0 auto;flex-direction:row;gap:6px}.dsh-taskboard-automation-menu article small,.dsh-taskboard-automation-menu article span,.dsh-taskboard-automation-menu>p{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-log{display:flex;flex-direction:column;gap:6px;margin-top:18px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px}.dsh-taskboard-log header{display:flex;align-items:center;justify-content:space-between}.dsh-taskboard-log h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-log>p{margin:0;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-log ol{list-style:none;margin:0;padding:0}.dsh-taskboard-log li{display:flex;flex-direction:column;gap:2px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-log li:first-child{border-top:0}.dsh-taskboard-log time{color:var(--dsw-alias-label-tertiary,#81858c);font-size:12px;line-height:18px}.dsh-taskboard-log span{color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-log li[data-kind=claimed] span{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-log li[data-kind=error],.dsh-taskboard-log li[data-kind=quota-paused] span{color:var(--dsw-alias-state-error-primary,#ec1313)}
+.dsh-taskboard-storage{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;padding:12px;border:1px solid var(--dsw-alias-state-success-primary,#22c55e);border-radius:12px;background:var(--dsw-alias-state-success-tertiary,#e6faed)}.dsh-taskboard-storage[data-status=degraded]{border-color:var(--dsw-alias-state-warn-primary,#f59e0b);background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-storage header{display:flex;flex:1 0 100%;align-items:center;justify-content:space-between}.dsh-taskboard-storage h2{margin:0;font-size:14px;font-weight:500}.dsh-taskboard-storage span{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-workflows{display:grid;grid-template-columns:190px 1fr;min-height:420px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;overflow:hidden}.dsh-taskboard-workflows>aside{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-workflows>aside button{display:flex;justify-content:space-between;padding:9px 12px;border:1px solid transparent;border-radius:12px;background:transparent;text-align:left;min-height:40px}.dsh-taskboard-workflows>aside button.active{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}.dsh-taskboard-workflows>section{padding:14px;overflow:auto}.dsh-taskboard-workflows>section>header{display:flex;gap:8px;position:relative;flex-wrap:wrap}.dsh-taskboard-workflows>section>header input{flex:1;min-width:120px}.dsh-taskboard-workflow-tabs{display:flex;gap:20px;padding:20px 0}.dsh-taskboard-workflow-tabs>article{min-width:240px}.dsh-taskboard-workflow-tabs>article>header{display:flex;align-items:center;justify-content:space-between}.dsh-taskboard-workflow-node{margin:8px 0;padding:11px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-workflow-node[data-execution=executable]{border-color:var(--dsw-alias-state-success-primary,#22c55e);background:var(--dsw-alias-state-success-tertiary,#e6faed)}.dsh-taskboard-workflow-node>small{display:block;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-flow-line{height:20px;margin-left:28px;border-left:2px solid var(--dsw-alias-border-l3,rgba(0,0,0,.12))}.dsh-taskboard-branches{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.dsh-taskboard-workflows footer{display:flex;flex-wrap:wrap;gap:5px}.dsh-taskboard-workflows footer span{padding:3px 6px;border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);font-size:11px}.dsh-taskboard-workflows footer span[data-execution=executable]{background:var(--dsw-alias-state-success-tertiary,#e6faed)}
+.dsh-taskboard-workflow-node-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.dsh-taskboard-workflow-node-actions button{padding:2px 8px;min-height:22px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:11px;background:transparent;font-size:11px}
+.dsh-taskboard-capabilities{margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-capabilities h3{margin:0 0 5px;font-weight:500}.dsh-taskboard-capabilities>div{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.dsh-taskboard-markdown{overflow-wrap:anywhere}.dsh-taskboard-markdown p{margin:0 0 8px;white-space:pre-wrap}.dsh-taskboard-markdown p:last-child{margin-bottom:0}.dsh-taskboard-markdown pre{overflow:auto;padding:8px;border-radius:8px;background:var(--dsw-alias-markdown-code-block,#f9fafb)}
+.dsh-taskboard-popover{position:relative}.dsh-taskboard-popover>form,.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:10;display:flex;flex-direction:column;gap:8px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-popover form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-popover form div,.dsh-taskboard-inline-form{display:flex;gap:7px}.dsh-taskboard-confirm{position:relative;top:auto;right:auto;width:auto;margin:8px 0}.dsh-taskboard-reason{padding:12px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-reason label{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-relation-create{display:grid;grid-template-columns:1fr;gap:6px}.dsh-taskboard-inline-form{align-items:end;padding:10px 0}.dsh-taskboard-inline-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-workflow-create{display:flex;flex-direction:column;gap:5px}.dsh-taskboard-workflow-create input{min-width:0}
+.dsh-taskboard-summary,.dsh-taskboard-due{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px}.dsh-taskboard-summary h2,.dsh-taskboard-due h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-due button{display:flex;justify-content:space-between;gap:12px;padding:8px;border:0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:0;background:transparent;text-align:left;min-height:0}.dsh-taskboard-automation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;flex:1 0 100%;padding:10px 0}.dsh-taskboard-automation-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-automation-form label:has(input[type="checkbox"]){flex-direction:row;align-items:center}
+@media(max-width:900px){.dsh-taskboard-dashboard{grid-template-columns:repeat(2,1fr)}.dsh-taskboard-board{grid-template-columns:1fr}.dsh-taskboard-dialog-backdrop{padding:12px}.dsh-taskboard-detail{height:min(100%,calc(100vh - 24px));border-radius:16px}.dsh-taskboard-detail-columns{grid-template-columns:1fr}.dsh-taskboard-detail-side{border-left:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-header{gap:5px}.dsh-taskboard-gantt button{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.dsh-taskboard-page *{scroll-behavior:auto!important;transition:none!important}}
 `

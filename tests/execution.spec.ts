@@ -3,10 +3,15 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import type { HumanActor } from '../src/domain/index.js'
-import { HarnessTaskboardWorker } from '../src/execution/index.js'
+import { completionResultComment, HarnessTaskboardWorker } from '../src/execution/index.js'
 import { TaskboardService } from '../src/service/index.js'
 
 const human: HumanActor = { kind: 'human', actorId: 'user-1' }
+const hostDefaultModel = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+
+function provideDefaultModel(ctx: Context): void {
+  ctx.provide('agentDefaultModel', { currentSelection: () => hostDefaultModel } as never)
+}
 
 test('native worker binds workspace, persists task input, follows human changes, and maps Goal completion to review', async () => {
   const ctx = new Context()
@@ -22,6 +27,7 @@ test('native worker binds workspace, persists task input, follows human changes,
   } | undefined
 
   ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  provideDefaultModel(ctx)
   ctx.provide('workspaceRegistry', {
     get: () => ({ path: '/workspace/project', attachSession: async (id: string) => { attachedSessions.push(id) } }),
   } as never)
@@ -71,6 +77,7 @@ test('native worker binds workspace, persists task input, follows human changes,
       cwd: '/workspace/project/.worktrees/task',
       agentPreset: 'coding',
     })
+    assert.deepEqual(createOptions[0]?.['agentOptions'], hostDefaultModel)
     assert.equal(attachedSessions.length, 1)
     assert.deepEqual(createdGoals, [{ objective: 'Complete and verify DSH-1: Native worker' }])
     assert.equal(messages.length, 1)
@@ -80,6 +87,7 @@ test('native worker binds workspace, persists task input, follows human changes,
       kind: 'taskboard', taskId: task.id, claimId: activeClaim.id,
       claimedRevision: service.provider.getTask(task.id).version,
     })
+    assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /Never modify the task description/)
     assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /Only a human may accept it as done/)
 
     const inProgress = service.provider.getTask(task.id)
@@ -98,7 +106,8 @@ test('native worker binds workspace, persists task input, follows human changes,
     })
     const reviewed = service.provider.getTask(task.id)
     assert.equal(reviewed.status, 'in_review')
-    assert.match(service.provider.getTaskDetail(task.id).comments.at(-1)?.body ?? '', /Harness Goal completed/)
+    assert.match(service.provider.getTaskDetail(task.id).comments.at(-1)?.body ?? '', /Work completed/)
+    assert.equal(service.provider.getTask(task.id).description, 'New durable requirement.')
 
     await worker.stop()
   } finally {
@@ -113,15 +122,18 @@ test('startup reconciliation resumes the original orphaned Session and maps a bl
   const messages: Message[] = []
   let resumedAgent: { id: string; followup(message: Message): void; whenIdle(): Promise<void> } | undefined
   ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  provideDefaultModel(ctx)
   ctx.provide('workspaceRegistry', { get: () => undefined } as never)
   ctx.provide('goals', {
     get: () => undefined,
     create: () => ({ id: 'goal-resumed' }),
   } as never)
+  const resumeOptions: Array<Record<string, unknown>> = []
   ctx.provide('agents', {
     list: () => [],
     create: async () => { throw new Error('reconciliation must not create a replacement Session') },
     resume: async (options: { resumeSessionId: string; setup(context: Context): Promise<void> }) => {
+      resumeOptions.push(options)
       resumed.push(options.resumeSessionId)
       await options.setup(new Context())
       resumedAgent = {
@@ -148,6 +160,7 @@ test('startup reconciliation resumes the original orphaned Session and maps a bl
     const worker = new HarnessTaskboardWorker(ctx, service)
     await worker.reconcile()
     assert.deepEqual(resumed, [sessionId])
+    assert.deepEqual(resumeOptions[0]?.['agentOptions'], hostDefaultModel)
     assert.equal(service.provider.getTaskDetail(task.id).activeClaim?.sessionId, sessionId)
     assert.equal(service.provider.getTaskDetail(task.id).activeClaim?.state, 'active')
     assert.equal(messages[0]?.source.kind, 'taskboard')
@@ -165,4 +178,75 @@ test('startup reconciliation resumes the original orphaned Session and maps a bl
   } finally {
     service.provider.close()
   }
+})
+
+test('native worker prefers an explicit automation modelRoute over the Host default', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  const createOptions: Array<Record<string, unknown>> = []
+  provideDefaultModel(ctx)
+  ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  ctx.provide('workspaceRegistry', { get: () => undefined } as never)
+  ctx.provide('goals', { get: () => undefined, create: () => ({ id: 'goal-1' }) } as never)
+  ctx.provide('agents', {
+    list: () => [],
+    create: async (options: Record<string, unknown> & { sessionId: string; setup(context: Context): Promise<void> }) => {
+      createOptions.push(options)
+      await options.setup(new Context())
+      return {
+        agent: { id: options.sessionId, followup: () => undefined, whenIdle: () => Promise.resolve() },
+        dispose: () => Promise.resolve(),
+      }
+    },
+    resume: async () => { throw new Error('unexpected resume') },
+  } as never)
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'Routed model', creator: human.actorId }, human)
+    task = service.provider.approve(task.id, task.version, human)
+    const rule = service.provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1,
+      quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+      modelRoute: 'acme-gateway:acme-large', reasoning: 'high',
+    }, human)
+    const worker = new HarnessTaskboardWorker(ctx, service)
+    await worker.start(rule, task)
+    assert.deepEqual(createOptions[0]?.['agentOptions'], { provider: 'acme-gateway', model: 'acme-large' })
+    await worker.stop()
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('native worker fails loudly when Host default model is missing and modelRoute is empty', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  ctx.provide('workspaceRegistry', { get: () => undefined } as never)
+  ctx.provide('goals', { get: () => undefined, create: () => ({ id: 'goal-1' }) } as never)
+  ctx.provide('agents', {
+    list: () => [],
+    create: async () => { throw new Error('must not create an Agent without a model') },
+    resume: async () => { throw new Error('unexpected resume') },
+  } as never)
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'No model', creator: human.actorId }, human)
+    task = service.provider.approve(task.id, task.version, human)
+    const rule = service.provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1,
+      quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+    }, human)
+    const worker = new HarnessTaskboardWorker(ctx, service)
+    await assert.rejects(() => worker.start(rule, task), /Host default model is unavailable/)
+    assert.equal(service.provider.getTask(task.id).status, 'todo')
+    await worker.stop()
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('goal completion writes a result comment and does not copy existing comments', () => {
+  assert.equal(completionResultComment([]), 'Work completed.')
+  assert.equal(completionResultComment([{ body: 'Implemented the endpoint.' }]), 'Ready for review.')
 })

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyRevisionChange, decodeTaskboardHash, encodeTaskboardRoute, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController } from '../src/client/controller.js'
+import { classifyRevisionChange, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
+import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
 test('Taskboard deep links preserve project, view, and task identity', () => {
   const route = { open: true, projectId: 'project/a', view: 'gantt' as const, taskId: 'task 42' }
@@ -44,7 +45,20 @@ test('new Session draft carries the exact task identity, current facts, and huma
   assert.match(draft, /Preserve the draft/)
   assert.match(draft, /Worktree \/work\/task, branch task\/session/)
   assert.match(draft, /attachment-one: spec\.md/)
+  assert.match(draft, /Never modify the task description/)
   assert.match(draft, /Never accept it as done/)
+})
+
+test('board drops move status across columns and reorder inside one column', () => {
+  const dragged = { id: 't1', status: 'todo' as const, version: 4 }
+  assert.deepEqual(boardDropIntent(dragged, 'in_progress'), {
+    kind: 'move', taskId: 't1', expectedVersion: 4, status: 'in_progress',
+  })
+  assert.deepEqual(boardDropIntent(dragged, 'todo', { id: 't2', sortOrder: 10 }), {
+    kind: 'reorder', taskId: 't1', expectedVersion: 4, sortOrder: 9.5,
+  })
+  assert.equal(boardDropIntent(dragged, 'todo', { id: 't1', sortOrder: 10 }).kind, 'none')
+  assert.equal(boardDropIntent({ ...dragged, archivedAt: 1 }, 'in_review').kind, 'none')
 })
 
 test('snapshot revisions distinguish contiguous updates, missed-event gaps, and Host resets', () => {
@@ -94,14 +108,59 @@ test('explicit new Session creation carries an unsent task draft and returns the
   assert.match(captured?.draft ?? '', /Opaque task id: task-one/)
 })
 
-test('client copy selects complete Chinese and English labels from the browser language', () => {
+test('client copy selects complete Chinese and English labels from the Harness language', () => {
   const zh = taskboardStrings('zh-CN')
   const en = taskboardStrings('en-US')
+  assert.equal(zh.closeDetail, '关闭详情')
+  assert.equal(zh.save, '保存')
   assert.equal(zh.newSession, '在新会话中打开')
+  assert.equal(zh.write, '编写')
+  assert.equal(zh.openIssue, '打开')
+  assert.equal(zh.closeIssue, '关闭任务')
+  assert.equal(zh.urgent, '紧急')
+  assert.equal(zh.high, '高')
+  assert.equal(zh.medium, '中')
+  assert.equal(zh.low, '低')
+  assert.equal(zh.none, '无')
+  assert.equal(zh.automationLog, '自动化运行日志')
+  assert.equal(en.closeDetail, 'Close details')
+  assert.equal(en.save, 'Save')
+  assert.equal(en.write, 'Write')
+  assert.equal(en.preview, 'Preview')
+  assert.equal(en.edit, 'Edit')
+  assert.equal(zh.edit, '编辑')
+  assert.equal(en.openIssue, 'Open')
+  assert.equal(en.closeIssue, 'Close issue')
+  assert.equal(en.targetDate, 'Target date')
+  assert.equal(en.urgent, 'Urgent')
+  assert.equal(en.automationLog, 'Automation run log')
   assert.equal(zh.developmentContext, '开发上下文')
   assert.equal(zh.pauseUncertain, '配额不确定时暂停')
   assert.equal(en.newSession, 'Open in new session')
   assert.equal(en.developmentContext, 'Development context')
+  assert.equal(priorityLabel(zh, 'urgent'), '紧急')
+  assert.equal(priorityLabel(en, 'medium'), 'Medium')
+  assert.equal(formatAutomationLog(zh, { kind: 'claimed', taskId: 't1', message: 'worker started for DSH-2', at: 1 }, 'DSH-2 · Wire'), '读取待办并开始执行 DSH-2 · Wire')
+  assert.equal(formatAutomationLog(zh, { kind: 'empty', message: 'no eligible todo tasks', at: 1 }), '已检查待办，当前没有可执行的任务')
+  assert.equal(formatAutomationLog(en, { kind: 'empty', message: 'worker concurrency is currently full', at: 1 }), 'Workers are busy; no new task was started')
+})
+
+test('client locale binding follows the Harness language source', () => {
+  let active = 'en'
+  const listeners = new Set<() => void>()
+  const unbind = bindTaskboardLocale({
+    subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    getSnapshot: () => ({ active }),
+  })
+  try {
+    assert.equal(currentTaskboardLanguage(), 'en')
+    active = 'zh'
+    for (const listener of listeners) listener()
+    assert.equal(currentTaskboardLanguage(), 'zh')
+    assert.equal(taskboardStrings(currentTaskboardLanguage()).priority, '优先级')
+  } finally {
+    unbind()
+  }
 })
 
 test('client reconnect subscription uses the public Host-description generation and unwinds cleanly', () => {

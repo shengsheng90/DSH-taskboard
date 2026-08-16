@@ -29,6 +29,7 @@ test('service exposes one authoritative snapshot and loopback human intents', ()
     assert.equal(snapshot.projects.length, 1)
     assert.equal(snapshot.tasks[0]?.identifier, 'DSH-1')
     assert.equal(snapshot.globalRevision, 2)
+    assert.deepEqual(snapshot.automationRuns, [])
   } finally {
     service.provider.close()
   }
@@ -181,6 +182,23 @@ test('snapshot discovers installed Skill and MCP capabilities without claiming t
       skillDiscoveryComplete: true,
     })
     assert.equal(snapshot.workflowCatalog.find(entry => entry.kind === 'skill')?.execution, 'design-only')
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('human RPC can move a task status from the board without a claim', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  const human = { kind: 'human', actorId: 'human' } as const
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    const task = service.provider.createTask({ projectId: project.id, title: 'Board move', creator: 'human', status: 'todo' }, human)
+    const result = service.dispatchHumanRpc('task.move', {
+      taskId: task.id, expectedVersion: task.version, status: 'in_progress',
+    }, human)
+    assert.equal(result.ok, true)
+    assert.equal(service.provider.getTask(task.id).status, 'in_progress')
   } finally {
     service.provider.close()
   }
