@@ -3,8 +3,8 @@
 Every success is `{ "schemaVersion": 1, "value": ... }`. Every error includes the same schema version and a stable code. Mutations other than create require `--version`.
 
 ```text
-project list|get|create|update|delete
-task list|get|create|update|approve|accept|move|return|block|resume|cancel|reopen|archive|restore|force-takeover|delete|comment
+project list|get|create|update|delete|rename-label|remove-label
+task list|get|create|update|approve|accept|move|return|block|resume|cancel|reopen|archive|restore|force-takeover|delete|comment|comment-update|comment-delete
 relation add|delete
 attachment list|add|download|delete
 workflow list|get|create|update|delete

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { TaskboardService } from '../src/service/index.js'
+import { TaskboardAutomationCoordinator } from '../src/automation/index.js'
+import { hostAutomationDefaults, TaskboardService } from '../src/service/index.js'
 
 const config = {
   databasePath: ':memory:',
@@ -30,8 +31,52 @@ test('service exposes one authoritative snapshot and loopback human intents', ()
     assert.equal(snapshot.tasks[0]?.identifier, 'DSH-1')
     assert.equal(snapshot.globalRevision, 2)
     assert.deepEqual(snapshot.automationRuns, [])
+    assert.deepEqual(snapshot.automationDefaults, {
+      agentPreset: 'standard',
+      minIntervalMs: 30_000,
+    })
   } finally {
     service.provider.close()
+  }
+})
+
+test('snapshot prefills automation defaults from the Host model selection', () => {
+  const hostModel = {
+    currentSelection: () => ({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'low',
+    }),
+  }
+  const hostCtx = new Context()
+  hostCtx.provide('agentDefaultModel', hostModel as never)
+  const hostService = new TaskboardService(hostCtx, config)
+  const overrideCtx = new Context()
+  overrideCtx.provide('agentDefaultModel', hostModel as never)
+  const overrideService = new TaskboardService(overrideCtx, {
+    ...config,
+    defaultModelRoute: 'acme-gateway:acme-large',
+  })
+  try {
+    assert.deepEqual(hostAutomationDefaults(hostCtx), {
+      modelRoute: 'deepseek-official:deepseek-v4-flash',
+      reasoning: 'low',
+    })
+    assert.deepEqual(hostService.snapshot().automationDefaults, {
+      agentPreset: 'standard',
+      modelRoute: 'deepseek-official:deepseek-v4-flash',
+      reasoning: 'low',
+      minIntervalMs: 30_000,
+    })
+    assert.deepEqual(overrideService.snapshot().automationDefaults, {
+      agentPreset: 'standard',
+      modelRoute: 'acme-gateway:acme-large',
+      reasoning: 'low',
+      minIntervalMs: 30_000,
+    })
+  } finally {
+    hostService.provider.close()
+    overrideService.provider.close()
   }
 })
 
@@ -84,6 +129,36 @@ test('service unload settles pending change watches before closing SQLite', asyn
   )
   await ctx.fiber.dispose()
   assert.deepEqual(await waiting, { globalRevision: revision, changed: false })
+})
+
+test('human RPC updates and deletes comments through optimistic versions', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  const human = { kind: 'human', actorId: 'human' } as const
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'Notes', creator: 'human' }, human)
+    const created = service.dispatchHumanRpc('task.comment', {
+      taskId: task.id, expectedVersion: task.version, body: 'Draft',
+    }, human)
+    assert.equal(created.ok, true)
+    if (!created.ok) return
+    const comment = created.value as { id: string }
+    task = service.provider.getTask(task.id)
+    const updated = service.dispatchHumanRpc('comment.update', {
+      taskId: task.id, expectedVersion: task.version, commentId: comment.id, body: 'Revised',
+    }, human)
+    assert.equal(updated.ok, true)
+    task = service.provider.getTask(task.id)
+    assert.equal(service.provider.getTaskDetail(task.id).comments[0]?.body, 'Revised')
+    const deleted = service.dispatchHumanRpc('comment.delete', {
+      taskId: task.id, expectedVersion: task.version, commentId: comment.id,
+    }, human)
+    assert.equal(deleted.ok, true)
+    assert.equal(service.provider.getTaskDetail(task.id).comments.length, 0)
+  } finally {
+    service.provider.close()
+  }
 })
 
 test('human lifecycle RPC can establish a fresh direct rework claim', () => {
@@ -199,6 +274,62 @@ test('human RPC can move a task status from the board without a claim', () => {
     }, human)
     assert.equal(result.ok, true)
     assert.equal(service.provider.getTask(task.id).status, 'in_progress')
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('human RPC can run an automation immediately without moving its schedule', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  const actor = { kind: 'human', actorId: 'human' } as const
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, actor)
+    const task = service.provider.createTask({ projectId: project.id, title: 'Now', creator: 'human', status: 'todo' }, actor)
+    let rule = service.provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+    }, actor)
+    rule = service.provider.updateAutomation(rule.id, rule.version, { state: 'enabled' }, actor)
+    const scheduledAt = Date.now() + 60_000
+    rule = service.provider.recordAutomationDecision(rule.id, rule.version, {
+      kind: 'empty', message: 'parked for later', at: Date.now(),
+    }, scheduledAt)
+    const started: string[] = []
+    const coordinator = new TaskboardAutomationCoordinator(service, {
+      start(activeRule, candidate) {
+        const sessionId = `automation-${candidate.id}`
+        service.provider.claim(candidate.id, {
+          expectedVersion: candidate.version, sessionId, agentId: sessionId,
+        }, { kind: 'automation', actorId: sessionId, automationId: activeRule.id, sessionId, agentId: sessionId })
+        started.push(candidate.id)
+        return Promise.resolve()
+      },
+    })
+    service.bindAutomation(coordinator)
+    const result = await service.remoteMutate({
+      endpoint: 'automation.run-now',
+      payloadJson: JSON.stringify({ automationId: rule.id }),
+    })
+    assert.equal(result.ok, true)
+    const after = service.provider.getAutomation(rule.id)
+    assert.deepEqual(started, [task.id])
+    assert.equal(after.nextEligibleAt, scheduledAt)
+    assert.equal(after.state, 'enabled')
+    const unbound = new TaskboardService(new Context(), config)
+    try {
+      const other = unbound.provider.createProject({ key: 'OTH', name: 'Other' }, actor)
+      const otherRule = unbound.provider.createAutomation(other.id, {
+        intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+      }, actor)
+      const refused = await unbound.remoteMutate({
+        endpoint: 'automation.run-now',
+        payloadJson: JSON.stringify({ automationId: otherRule.id }),
+      })
+      assert.equal(refused.ok, false)
+    } finally {
+      unbound.provider.close()
+    }
+    await coordinator.stop()
   } finally {
     service.provider.close()
   }

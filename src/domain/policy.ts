@@ -1,7 +1,10 @@
 import { TaskboardError } from './error.js'
 import { TASK_STATUSES, type TaskStatus, type TaskboardActor } from './types.js'
 
-const HUMAN_ONLY = new Set(['approve', 'return', 'accept', 'resume', 'cancel', 'reopen', 'archive', 'restore', 'delete', 'force-reclaim', 'move status'])
+const HUMAN_ONLY = new Set([
+  'approve', 'return', 'accept', 'resume', 'cancel', 'reopen', 'archive', 'restore', 'delete',
+  'force-reclaim', 'move status', 'update comment', 'delete comment', 'rename project label', 'remove project label',
+])
 
 /** Parse a UI/CLI status token into the closed Taskboard vocabulary. */
 export function parseTaskStatus(value: string): TaskStatus {

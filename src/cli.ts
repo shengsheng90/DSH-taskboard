@@ -158,6 +158,14 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
       )
     } else if (group === 'project' && command === 'delete') {
       value = provider.deleteProject(ProjectId(required(options, 'project')), version(options), actor)
+    } else if (group === 'project' && command === 'rename-label') {
+      value = provider.renameProjectLabel(
+        ProjectId(required(options, 'project')), version(options), required(options, 'from'), required(options, 'to'), actor,
+      )
+    } else if (group === 'project' && command === 'remove-label') {
+      value = provider.removeProjectLabel(
+        ProjectId(required(options, 'project')), version(options), required(options, 'label'), actor,
+      )
     } else if (group === 'task' && command === 'list') {
       const statuses = options.get('status')?.split(',').filter(Boolean) as TaskStatus[] | undefined
       value = provider.listTasks({
@@ -222,6 +230,14 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
       value = provider.deleteTask(TaskId(required(options, 'task')), version(options), actor)
     } else if (group === 'task' && command === 'comment') {
       value = provider.comment(TaskId(required(options, 'task')), version(options), required(options, 'body'), actor)
+    } else if (group === 'task' && command === 'comment-update') {
+      value = provider.updateComment(
+        TaskId(required(options, 'task')), version(options), required(options, 'comment'), required(options, 'body'), actor,
+      )
+    } else if (group === 'task' && command === 'comment-delete') {
+      value = provider.deleteComment(
+        TaskId(required(options, 'task')), version(options), required(options, 'comment'), actor,
+      )
     } else if (group === 'relation' && command === 'add') {
       value = provider.addRelation(
         TaskId(required(options, 'source')), version(options), TaskId(required(options, 'target')),

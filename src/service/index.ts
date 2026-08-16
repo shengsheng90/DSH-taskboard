@@ -44,6 +44,11 @@ export interface ResolvedTaskboardConfig {
   readonly defaultModelRoute?: string
 }
 
+/** Host-owned scheduler seam used by the human run-now intent. */
+export interface TaskboardAutomationHost {
+  runImmediate(ruleId: string): Promise<void>
+}
+
 export interface TaskboardSnapshot {
   readonly schemaVersion: 1
   readonly globalRevision: number
@@ -62,6 +67,7 @@ export interface TaskboardSnapshot {
   readonly automationDefaults: {
     readonly agentPreset: string
     readonly modelRoute?: string
+    readonly reasoning?: string
     readonly minIntervalMs: number
   }
   readonly storageHealth: TaskboardStorageHealth
@@ -106,6 +112,38 @@ function nonNegativeInteger(value: unknown, label: string): number {
 
 function human(actorId: string): HumanActor {
   return { kind: 'human', actorId }
+}
+
+/** Read the Host's current model/reasoning so automation forms can prefill them. */
+export function hostAutomationDefaults(ctx: Context): { readonly modelRoute?: string; readonly reasoning?: string } {
+  try {
+    const selected = ctx.get('agentDefaultModel') as undefined | {
+      currentSelection(): { provider?: string; model?: string; reasoningEffort?: unknown }
+    }
+    const current = selected?.currentSelection()
+    const provider = typeof current?.provider === 'string' ? current.provider.trim() : ''
+    const model = typeof current?.model === 'string' ? current.model.trim() : ''
+    const reasoning = current?.reasoningEffort
+    return {
+      ...(provider.length > 0 && model.length > 0 ? { modelRoute: `${provider}:${model}` } : {}),
+      ...(typeof reasoning === 'string' && reasoning.trim() !== '' ? { reasoning: reasoning.trim() } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
+function resolveAutomationDefaults(
+  config: ResolvedTaskboardConfig,
+  host: { readonly modelRoute?: string; readonly reasoning?: string },
+): TaskboardSnapshot['automationDefaults'] {
+  const modelRoute = config.defaultModelRoute ?? host.modelRoute
+  return {
+    agentPreset: config.defaultAgentPreset,
+    minIntervalMs: config.minAutomationIntervalMs,
+    ...(modelRoute === undefined ? {} : { modelRoute }),
+    ...(host.reasoning === undefined ? {} : { reasoning: host.reasoning }),
+  }
 }
 
 function resolved(config: Config): ResolvedTaskboardConfig {
@@ -160,6 +198,7 @@ export class TaskboardService extends TypertRemoteService {
   }>()
   private lastRevision = 0
   private acceptingChangeWatches = true
+  private automationHost: TaskboardAutomationHost | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'taskboard')
@@ -187,8 +226,9 @@ export class TaskboardService extends TypertRemoteService {
       }
     }, 'taskboard: revision long-poll lifecycle')
     ctx.inject(['connection'], (connectionCtx) => {
-      const handler: ConnectionRpcHandler = (endpoint, payload) =>
-        Promise.resolve(this.dispatchHumanRpc(endpoint, payload, human('human:web-client')))
+      const handler: ConnectionRpcHandler = (endpoint, payload) => endpoint === 'automation.run-now'
+        ? this.dispatchAutomationRunNow(payload)
+        : Promise.resolve(this.dispatchHumanRpc(endpoint, payload, human('human:web-client')))
       connectionCtx.effect(
         () => connectionCtx.connection.rpc.handle(
           '/taskboard',
@@ -221,6 +261,19 @@ export class TaskboardService extends TypertRemoteService {
       refresh()
       toolCtx.on('tools/change', refresh)
     })
+  }
+
+  bindAutomation(host: TaskboardAutomationHost): void {
+    this.automationHost = host
+  }
+
+  async runAutomationNow(automationId: string): Promise<AutomationRule> {
+    this.provider.getAutomation(automationId)
+    if (this.automationHost === undefined) {
+      throw new TaskboardError('automation coordinator is not running', 'TASK_INVALID_INPUT')
+    }
+    await this.automationHost.runImmediate(automationId)
+    return this.provider.getAutomation(automationId)
   }
 
   taskDetail(taskId: TaskboardTaskId): TaskDetail {
@@ -266,11 +319,7 @@ export class TaskboardService extends TypertRemoteService {
         skillDiscoveryComplete: this.skillDiscoveryComplete,
       },
       refreshIntervalMs: this.config.clientRefreshIntervalMs,
-      automationDefaults: {
-        agentPreset: this.config.defaultAgentPreset,
-        ...(this.config.defaultModelRoute === undefined ? {} : { modelRoute: this.config.defaultModelRoute }),
-        minIntervalMs: this.config.minAutomationIntervalMs,
-      },
+      automationDefaults: resolveAutomationDefaults(this.config, hostAutomationDefaults(this.hostCtx)),
       storageHealth: this.provider.storageHealth(),
     }
   }
@@ -305,6 +354,11 @@ export class TaskboardService extends TypertRemoteService {
         const message = error instanceof TaskboardError ? error.message : error instanceof Error ? error.message : String(error)
         return { ok: false, errorCode: error instanceof TaskboardError ? error.code : 'internal', errorMessage: message }
       }
+    }
+    if (request.endpoint === 'automation.run-now') {
+      const result = await this.dispatchAutomationRunNow(payload)
+      if (!result.ok) return { ok: false, errorCode: result.error.code, errorMessage: result.error.message }
+      return { ok: true, valueJson: JSON.stringify(result.value ?? null) }
     }
     const result = this.dispatchHumanRpc(request.endpoint, payload, human('human:web-client'))
     if (!result.ok) return { ok: false, errorCode: result.error.code, errorMessage: result.error.message }
@@ -342,6 +396,19 @@ export class TaskboardService extends TypertRemoteService {
     try {
       const input = record(payload, 'RPC payload')
       const value = this.dispatchHuman(endpoint, input, actor)
+      return { ok: true, value }
+    } catch (error) {
+      const message = error instanceof TaskboardError
+        ? `${error.code}: ${error.message}`
+        : error instanceof Error ? error.message : String(error)
+      return { ok: false, error: { code: 'internal', message, details: {} } }
+    }
+  }
+
+  private async dispatchAutomationRunNow(payload: unknown): Promise<RpcResult<unknown>> {
+    try {
+      const input = record(payload, 'RPC payload')
+      const value = await this.runAutomationNow(string(input['automationId'], 'automationId'))
       return { ok: true, value }
     } catch (error) {
       const message = error instanceof TaskboardError
@@ -415,6 +482,23 @@ export class TaskboardService extends TypertRemoteService {
         return this.provider.deleteTask(this.taskId(input), this.version(input), actor)
       case 'task.comment':
         return this.provider.comment(this.taskId(input), this.version(input), string(input['body'], 'body'), actor)
+      case 'comment.update':
+        return this.provider.updateComment(
+          this.taskId(input), this.version(input), string(input['commentId'], 'commentId'), string(input['body'], 'body'), actor,
+        )
+      case 'comment.delete':
+        return this.provider.deleteComment(
+          this.taskId(input), this.version(input), string(input['commentId'], 'commentId'), actor,
+        )
+      case 'project.rename-label':
+        return this.provider.renameProjectLabel(
+          ProjectId(string(input['projectId'], 'projectId')), this.version(input),
+          string(input['from'], 'from'), string(input['to'], 'to'), actor,
+        )
+      case 'project.remove-label':
+        return this.provider.removeProjectLabel(
+          ProjectId(string(input['projectId'], 'projectId')), this.version(input), string(input['label'], 'label'), actor,
+        )
       case 'task.relation':
         return this.provider.addRelation(
           this.taskId(input), this.version(input), TaskId(string(input['targetTaskId'], 'targetTaskId')),
