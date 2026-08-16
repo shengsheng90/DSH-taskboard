@@ -13,3 +13,12 @@ xy-shengsheng.pub
 node_modules/
 lib/
 *.tgz
+
+# Machine-local editor/tooling state (repo must be self-contained; a global
+# gitignore currently hides these on some machines only)
+.claude/
+
+# Logs and local environment overrides
+*.log
+.env
+.env.*.local
