@@ -44,14 +44,19 @@ export function paginateBoardColumn<T extends { readonly updatedAt: number; read
   }
 }
 
-/** Human quick-add from the web form: land in Todo so Overview and the board can show it. */
+/** Human quick-add from the web form: land in Backlog so drafts are not claimed. */
 export function humanQuickCreateRequest(projectId: string, title: string): {
   readonly projectId: string
   readonly title: string
   readonly creator: 'human:web-client'
-  readonly status: 'todo'
+  readonly status: 'backlog'
 } {
-  return { projectId, title: title.trim(), creator: 'human:web-client', status: 'todo' }
+  return { projectId, title: title.trim(), creator: 'human:web-client', status: 'backlog' }
+}
+
+/** Empty descriptions open Write; saved Markdown opens Preview. */
+export function descriptionComposerMode(description: string): 'write' | 'preview' {
+  return description.trim() === '' ? 'write' : 'preview'
 }
 
 /** Accept a create mutation result only when it carries a task id. */

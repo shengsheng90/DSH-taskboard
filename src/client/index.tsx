@@ -15,7 +15,7 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
@@ -995,8 +995,8 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
   const [developmentBranch, setDevelopmentBranch] = useState(task.developmentContext?.branch ?? '')
   const [worktreePath, setWorktreePath] = useState(task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : '')
   const [comment, setComment] = useState('')
-  const [descriptionMode, setDescriptionMode] = useState<'write' | 'preview'>('preview')
-  const [editingDescription, setEditingDescription] = useState(task.description.trim() === '')
+  const [descriptionMode, setDescriptionMode] = useState<'write' | 'preview'>(descriptionComposerMode(task.description))
+  const [editingDescription, setEditingDescription] = useState(true)
   const [commentMode, setCommentMode] = useState<'write' | 'preview'>('write')
   const [editingCommentId, setEditingCommentId] = useState<string>()
   const [editCommentBody, setEditCommentBody] = useState('')
@@ -1034,7 +1034,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
     setWorkflowId(task.workflowId ?? ''); setDevelopmentKind(task.developmentContext?.kind ?? ''); setDevelopmentBranch(task.developmentContext?.branch ?? '')
     setWorktreePath(task.developmentContext?.kind === 'worktree' ? task.developmentContext.path : '')
     setComment(''); setPendingAction(''); setActionReason(''); setConfirmDelete(false)
-    setDescriptionMode('preview'); setEditingDescription(task.description.trim() === ''); setCommentMode('write')
+    setDescriptionMode(descriptionComposerMode(task.description)); setEditingDescription(true); setCommentMode('write')
     setEditingCommentId(undefined); setEditCommentBody(''); setDeletingCommentId(undefined)
   }, [task.id])
   useEffect(() => { dialogRef.current?.focus() }, [task.id])
