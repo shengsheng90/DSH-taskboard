@@ -15,11 +15,11 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, boardDropIntent, createdTaskId, humanQuickCreateRequest, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
-  bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, formatOpenedAt, priorityLabel,
+  bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, formatOpenedAt, interpolate, priorityLabel,
   subscribeTaskboardLocale, TASKBOARD_LOCALE_NS, taskboardLocales, taskboardStrings,
   type TaskboardCopy, type TaskboardLocaleRuntime,
 } from './locales.js'
@@ -82,6 +82,15 @@ function CloseIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+/** Downward chevron used as the board-column lazy-load affordance. */
+function MoreIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M3.2 6.2L8 11l4.8-4.8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
@@ -411,7 +420,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
               : <>
                 <TaskCreate project={selected} mutate={mutate} onCreated={taskId => { controller.select(selected.id, route.view, taskId) }} />
                 {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} />}
-                {route.view === 'board' && <Board tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
+                {route.view === 'board' && <Board key={selected?.id ?? 'none'} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
                 {route.view === 'list' && <ListView tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
                 {route.view === 'labels' && <LabelsView project={selected} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
                 {route.view === 'gantt' && <Gantt tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
@@ -708,34 +717,72 @@ function Board({ tasks, open, mutate }: {
   return <>
     <div className="dsh-taskboard-board">
       {TASK_STATUSES.map(status => (
-        <section
+        <BoardColumn
           key={status}
-          data-status={status}
-          onDragOver={event => { event.preventDefault() }}
-          onDrop={event => { event.preventDefault(); applyDrop(status) }}
-        >
-          <h2>
-            <i className="dsh-taskboard-status-dot" data-status={status} />
-            <span>{t[status]}</span>
-            <small>{tasks.filter(task => task.status === status && task.archivedAt === undefined).length}</small>
-          </h2>
-          {tasks.filter(task => task.status === status && task.archivedAt === undefined).map(task => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              open={candidate => { if (!draggingRef.current) open(candidate) }}
-              drag={{
-                start: () => { draggingRef.current = true; setDraggedId(task.id) },
-                drop: () => { applyDrop(status, task) },
-                end: () => { setDraggedId(undefined); window.setTimeout(() => { draggingRef.current = false }, 0) },
-              }}
-            />
-          ))}
-        </section>
+          status={status}
+          tasks={tasks}
+          open={open}
+          applyDrop={applyDrop}
+          draggingRef={draggingRef}
+          setDraggedId={setDraggedId}
+        />
       ))}
     </div>
     {archived.length > 0 && <section className="dsh-taskboard-other"><h2>{t.other}</h2>{archived.map(task => <TaskCard key={task.id} task={task} open={open} />)}</section>}
   </>
+}
+
+function BoardColumn({ status, tasks, open, applyDrop, draggingRef, setDraggedId }: {
+  status: typeof TASK_STATUSES[number]
+  tasks: readonly TaskboardTask[]
+  open: (task: TaskboardTask) => void
+  applyDrop: (status: typeof TASK_STATUSES[number], target?: TaskboardTask) => void
+  draggingRef: { current: boolean }
+  setDraggedId: (id: string | undefined) => void
+}) {
+  const t = useStrings()
+  const [visibleCount, setVisibleCount] = useState(BOARD_COLUMN_PAGE_SIZE)
+  const columnTasks = useMemo(
+    () => tasks.filter(task => task.status === status && task.archivedAt === undefined),
+    [tasks, status],
+  )
+  const { visible, remaining } = paginateBoardColumn(columnTasks, visibleCount)
+  return (
+    <section
+      data-status={status}
+      onDragOver={event => { event.preventDefault() }}
+      onDrop={event => { event.preventDefault(); applyDrop(status) }}
+    >
+      <h2>
+        <i className="dsh-taskboard-status-dot" data-status={status} />
+        <span>{t[status]}</span>
+        <small>{columnTasks.length}</small>
+      </h2>
+      {visible.map(task => (
+        <TaskCard
+          key={task.id}
+          task={task}
+          open={candidate => { if (!draggingRef.current) open(candidate) }}
+          drag={{
+            start: () => { draggingRef.current = true; setDraggedId(task.id) },
+            drop: () => { applyDrop(status, task) },
+            end: () => { setDraggedId(undefined); window.setTimeout(() => { draggingRef.current = false }, 0) },
+          }}
+        />
+      ))}
+      {remaining > 0 && (
+        <button
+          type="button"
+          className="dsh-taskboard-more"
+          aria-label={`${t.more} · ${interpolate(t.moreRemaining, { count: remaining })}`}
+          onClick={() => { setVisibleCount(count => count + BOARD_COLUMN_PAGE_SIZE) }}
+        >
+          <MoreIcon size={16} />
+          <span className="dsh-taskboard-more-label">{t.more}</span>
+        </button>
+      )}
+    </section>
+  )
 }
 
 function TaskCard({ task, open, drag }: {
@@ -1327,7 +1374,7 @@ ${NAV_STYLES}
 .dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-dashboard strong{font-size:30px;line-height:38px;font-weight:500}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:12px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{display:flex;align-items:center;gap:8px;font-size:14px;line-height:22px;font-weight:500;margin:0 0 10px}.dsh-taskboard-board h2 small,.dsh-taskboard-other h2 small{margin-left:auto;color:var(--dsw-alias-label-tertiary,#81858c);font-weight:400}
 .dsh-taskboard-status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-status-dot[data-status=todo],.dsh-taskboard-status-dot[data-status=done]{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-status-dot[data-status=in_progress]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.dsh-taskboard-status-dot[data-status=in_review]{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-status-dot[data-status=blocked]{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-status-dot[data-status=canceled]{color:var(--dsw-alias-label-caption,#adb2b8)}.dsh-taskboard-status-dot[data-status=backlog]{color:var(--dsw-alias-label-tertiary,#81858c)}
-.dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
+.dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more{width:100%;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;margin-top:4px;padding:6px 8px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more-label{font-size:12px;line-height:18px}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
 .dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-table-wrap tbody tr{cursor:pointer}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
 .dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-dialog-backdrop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.24));backdrop-filter:var(--dsw-mask-blur,blur(2px))}

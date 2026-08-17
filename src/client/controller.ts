@@ -17,6 +17,7 @@ export interface TaskboardRoute {
 export type RevisionChange = 'initial' | 'same' | 'next' | 'gap' | 'reset'
 
 export const AUTOMATION_LOG_PREVIEW_LIMIT = 10
+export const BOARD_COLUMN_PAGE_SIZE = 15
 
 /** Keep the dashboard log short; the remainder opens in a dialog. */
 export function previewAutomationRuns<T>(runs: readonly T[], limit = AUTOMATION_LOG_PREVIEW_LIMIT): {
@@ -24,6 +25,23 @@ export function previewAutomationRuns<T>(runs: readonly T[], limit = AUTOMATION_
   readonly remaining: number
 } {
   return { preview: runs.slice(0, limit), remaining: Math.max(0, runs.length - limit) }
+}
+
+/** Newest-first page of one board column; later clicks reveal another page of older cards. */
+export function paginateBoardColumn<T extends { readonly updatedAt: number; readonly createdAt: number; readonly id: string }>(
+  tasks: readonly T[],
+  visibleCount = BOARD_COLUMN_PAGE_SIZE,
+): { readonly visible: readonly T[]; readonly remaining: number } {
+  const ordered = [...tasks].sort((left, right) => {
+    if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt
+    if (right.createdAt !== left.createdAt) return right.createdAt - left.createdAt
+    return left.id.localeCompare(right.id)
+  })
+  const limit = Math.max(0, visibleCount)
+  return {
+    visible: ordered.slice(0, limit),
+    remaining: Math.max(0, ordered.length - limit),
+  }
 }
 
 /** Human quick-add from the web form: land in Todo so Overview and the board can show it. */
