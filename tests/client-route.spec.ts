@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -181,12 +181,19 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(formatAutomationLog(en, { kind: 'empty', message: 'worker concurrency is currently full', at: 1 }), 'Workers are busy; no new task was started')
 })
 
-test('human quick-add creates a Todo task and only treats a mutation result with an id as success', () => {
+test('empty task descriptions open the write tab and saved Markdown opens preview', () => {
+  assert.equal(descriptionComposerMode(''), 'write')
+  assert.equal(descriptionComposerMode('   \n\t  '), 'write')
+  assert.equal(descriptionComposerMode('Fill in the size.'), 'preview')
+  assert.equal(descriptionComposerMode('  already written  '), 'preview')
+})
+
+test('human quick-add creates a Backlog task and only treats a mutation result with an id as success', () => {
   assert.deepEqual(humanQuickCreateRequest('project-one', '  Wire the form  '), {
     projectId: 'project-one',
     title: 'Wire the form',
     creator: 'human:web-client',
-    status: 'todo',
+    status: 'backlog',
   })
   assert.equal(createdTaskId({ id: 'task-created', title: 'Wire the form' }), 'task-created')
   assert.equal(createdTaskId({ title: 'missing id' }), undefined)
