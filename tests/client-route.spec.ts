@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, classifyRevisionChange, createdTaskId, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -140,6 +140,7 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(zh.none, '无')
   assert.equal(zh.automationLog, '自动化运行日志')
   assert.equal(zh.more, '更多')
+  assert.equal(zh.moreRemaining, '还有 {count} 个')
   assert.equal(zh.modify, '修改')
   assert.equal(zh.runNow, '立即执行')
   assert.equal(zh.recentTasks, '最近任务')
@@ -156,6 +157,7 @@ test('client copy selects complete Chinese and English labels from the Harness l
   assert.equal(en.urgent, 'Urgent')
   assert.equal(en.automationLog, 'Automation run log')
   assert.equal(en.more, 'More')
+  assert.equal(en.moreRemaining, '{count} more')
   assert.equal(en.modify, 'Modify')
   assert.equal(en.runNow, 'Run now')
   assert.equal(zh.unlabeled, '未标签')
@@ -185,6 +187,28 @@ test('human quick-add creates a Todo task and only treats a mutation result with
   assert.equal(createdTaskId({ id: 'task-created', title: 'Wire the form' }), 'task-created')
   assert.equal(createdTaskId({ title: 'missing id' }), undefined)
   assert.equal(createdTaskId(undefined), undefined)
+})
+
+test('board columns show the newest page of tasks and reveal older cards on later pages', () => {
+  const tasks = Array.from({ length: 18 }, (_, index) => ({
+    id: `task-${String(index).padStart(2, '0')}`,
+    createdAt: index,
+    updatedAt: index === 0 ? 100 : index,
+  }))
+  const first = paginateBoardColumn(tasks)
+  assert.equal(BOARD_COLUMN_PAGE_SIZE, 15)
+  assert.equal(first.visible.length, 15)
+  assert.equal(first.remaining, 3)
+  assert.deepEqual(first.visible.map(task => task.id), [
+    'task-00', 'task-17', 'task-16', 'task-15', 'task-14', 'task-13', 'task-12', 'task-11',
+    'task-10', 'task-09', 'task-08', 'task-07', 'task-06', 'task-05', 'task-04',
+  ])
+  const second = paginateBoardColumn(tasks, BOARD_COLUMN_PAGE_SIZE * 2)
+  assert.equal(second.visible.length, 18)
+  assert.equal(second.remaining, 0)
+  assert.deepEqual(second.visible.slice(15).map(task => task.id), ['task-03', 'task-02', 'task-01'])
+  assert.deepEqual(paginateBoardColumn(tasks.slice(0, 3)).visible.map(task => task.id), ['task-00', 'task-02', 'task-01'])
+  assert.equal(paginateBoardColumn(tasks.slice(0, 3)).remaining, 0)
 })
 
 test('dashboard automation log keeps the newest ten entries and fills empty model fields from Host defaults', () => {
