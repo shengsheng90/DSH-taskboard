@@ -208,7 +208,10 @@ export interface FreshClaimRequest {
 export interface TaskDetail {
   readonly task: TaskboardTask
   readonly comments: readonly TaskboardComment[]
+  /** Bounded newest-window of the activity log, oldest-first. Empty when the caller asked for none. */
   readonly activities: readonly TaskboardActivity[]
+  /** Total stored activity rows, so a bounded window never reads as the whole history. */
+  readonly activityTotal: number
   readonly relations: readonly TaskboardRelation[]
   readonly attachments: readonly TaskboardAttachment[]
   readonly activeClaim?: TaskboardClaim
@@ -231,6 +234,8 @@ export interface TaskboardSessionRuntime {
 export interface TaskboardStorageHealth {
   readonly status: 'ok' | 'degraded'
   readonly integrity: string
+  /** Epoch millis of the last full integrity scan; the scan never runs on the snapshot path. */
+  readonly integrityCheckedAt: number
   readonly schemaVersion: number
   readonly globalRevision: number
   readonly projectCount: number
@@ -238,6 +243,8 @@ export interface TaskboardStorageHealth {
   readonly attachmentCount: number
   readonly attachmentBytes: number
   readonly cleanupPending: number
+  /** Cleanup entries that exhausted their retry budget; they need a look, not another retry. */
+  readonly cleanupStalled: number
   readonly orphanedClaims: number
 }
 

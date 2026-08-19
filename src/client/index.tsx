@@ -15,7 +15,7 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, isPreviewableAttachment, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, TaskboardClientController, tasksForLabel, type TaskListSortKey } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
@@ -176,6 +176,34 @@ function MarkdownComposer({
   )
 }
 
+/** Attachment row with an inline preview for image types; other types stay download-only. */
+function AttachmentRow({ attachment, download, preview, remove, showMeta = false }: {
+  attachment: TaskDetailData['attachments'][number]
+  download: (attachmentId: string, filename: string) => Promise<void>
+  preview: (attachmentId: string) => Promise<string>
+  remove: () => void
+  showMeta?: boolean
+}) {
+  const t = useStrings()
+  const [url, setUrl] = useState<string>()
+  const previewable = isPreviewableAttachment(attachment.contentType)
+  return (
+    <article className="dsh-taskboard-attachment-row">
+      <div>
+        <button type="button" className="dsh-taskboard-link" onClick={() => { void download(attachment.id, attachment.filename) }}>{attachment.filename}</button>
+        {showMeta && <small>{attachment.contentType} · {attachment.byteSize} {t.bytes}</small>}
+        {previewable && <button type="button" className="dsh-taskboard-link" aria-expanded={url !== undefined} onClick={() => {
+          if (url !== undefined) { setUrl(undefined); return }
+          // Each ticket is single-use, so a fresh one is minted every time the preview reopens.
+          void preview(attachment.id).then(setUrl)
+        }}>{url === undefined ? t.showPreview : t.hidePreview}</button>}
+        <button type="button" onClick={remove}>{t.delete}</button>
+      </div>
+      {url !== undefined && <img src={url} alt={attachment.filename} />}
+    </article>
+  )
+}
+
 function MetaField({ label, children, nested = false }: { label: string; children: ReactNode; nested?: boolean }) {
   return (
     <div className={nested ? 'dsh-taskboard-meta-field dsh-taskboard-meta-nested' : 'dsh-taskboard-meta-field'}>
@@ -248,14 +276,24 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [logOpen, setLogOpen] = useState(false)
   const [undo, setUndo] = useState<{ endpoint: string; payload: Record<string, unknown> }>()
+  /** Newest globalRevision already rendered; the change poll uses it to skip redundant refetches. */
+  const loadedRevision = useRef(0)
+  /** Serializes writes so a double-click cannot duplicate a task or race the expected version. */
+  const inFlight = useRef(false)
+  /** Set by the open task dialog; title/description/meta edits live in local state until Save. */
+  const detailDirty = useRef(false)
+  const [discardPrompt, setDiscardPrompt] = useState(false)
   const t = useStrings()
 
+  // route.view is deliberately absent: every view renders the same snapshot, so switching tabs
+  // must not refetch it.
   useEffect(() => {
     if (!route.open) return
     const abort = new AbortController()
     setBusy(true)
     controller.snapshot(route.projectId, abort.signal).then(next => {
       controller.recordSnapshotRevision(next.globalRevision)
+      loadedRevision.current = next.globalRevision
       setSnapshot(next)
       setError(undefined)
       if (route.projectId === undefined && next.projects[0] !== undefined) controller.select(next.projects[0].id, route.view)
@@ -263,7 +301,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       if (!abort.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause))
     }).finally(() => { if (!abort.signal.aborted) setBusy(false) })
     return () => { abort.abort() }
-  }, [controller, refreshKey, route.open, route.projectId, route.view])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, refreshKey, route.open, route.projectId])
 
   useEffect(() => {
     if (!route.open || route.taskId === undefined) { setDetail(undefined); return }
@@ -296,7 +335,9 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         const result = await controller.watchChanges(revision, abort.signal)
         if (abort.signal.aborted) return
         if (result.changed || result.globalRevision !== revision) {
-          setRefreshKey(value => value + 1)
+          // A local mutation already refreshes on its own. Without this guard its committed
+          // revision wakes the poll too and the same snapshot is fetched a second time.
+          if (result.globalRevision > loadedRevision.current) setRefreshKey(value => value + 1)
           return
         }
         revision = result.globalRevision
@@ -312,6 +353,11 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
     if (!route.open) return
     const onKey = (event: globalThis.KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      if (discardPrompt) {
+        event.preventDefault()
+        setDiscardPrompt(false)
+        return
+      }
       if (logOpen) {
         event.preventDefault()
         setLogOpen(false)
@@ -319,14 +365,16 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       }
       if (route.taskId !== undefined) {
         event.preventDefault()
-        controller.select(route.projectId, route.view)
+        // Escape used to discard unsaved title/description edits without a word.
+        if (detailDirty.current) setDiscardPrompt(true)
+        else controller.select(route.projectId, route.view)
         return
       }
       controller.close()
     }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey) }
-  }, [controller, logOpen, route.open, route.projectId, route.taskId, route.view])
+  }, [controller, discardPrompt, logOpen, route.open, route.projectId, route.taskId, route.view])
 
   if (!route.open) return null
   const selected = snapshot?.projects.find(project => project.id === route.projectId) ?? snapshot?.projects[0]
@@ -339,7 +387,21 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   })
   const selectedTask = tasks.find(task => task.id === route.taskId)
   const refresh = (): void => { setRefreshKey(value => value + 1) }
+  const closeDetail = (): void => {
+    detailDirty.current = false
+    setDiscardPrompt(false)
+    controller.select(selected?.id, route.view)
+  }
+  /** Every path that closes the task dialog goes through here so unsaved edits are never dropped. */
+  const requestCloseDetail = (): void => {
+    if (detailDirty.current) setDiscardPrompt(true)
+    else closeDetail()
+  }
   const mutate = async (endpoint: string, payload: Record<string, unknown>): Promise<unknown> => {
+    // One in-flight write at a time. Without this a double-click either creates a duplicate task
+    // (task.create carries no expected version) or fails the second attempt on a stale version.
+    if (inFlight.current) return undefined
+    inFlight.current = true
     setBusy(true)
     try {
       const prior = endpoint === 'task.update' && typeof payload['taskId'] === 'string'
@@ -373,14 +435,22 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       if (message.includes('TASK_STALE_VERSION')) refresh()
       return undefined
     }
-    finally { setBusy(false) }
+    finally { inFlight.current = false; setBusy(false) }
   }
   const performUndo = async (): Promise<void> => {
-    if (undo === undefined) return
+    if (undo === undefined || inFlight.current) return
+    inFlight.current = true
     setBusy(true)
-    try { await controller.mutate(undo.endpoint, undo.payload); setUndo(undefined); setError(undefined); refresh() }
+    try {
+      // Re-read the version at click time: any write since the undo was recorded moved it on, and
+      // replaying the captured one only produced a stale-version error.
+      const current = tasks.find(task => task.id === undo.payload['taskId'])
+      const payload = current === undefined ? undo.payload : { ...undo.payload, expectedVersion: current.version }
+      await controller.mutate(undo.endpoint, payload)
+      setUndo(undefined); setError(undefined); refresh()
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { setBusy(false) }
+    finally { inFlight.current = false; setBusy(false) }
   }
 
   return (
@@ -410,7 +480,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           <button key={view} type="button" aria-current={route.view === view ? 'page' : undefined} onClick={() => { controller.select(selected?.id, view) }}>{t[view]}</button>
         ))}
       </nav>
-      {error !== undefined && <div className="dsh-taskboard-error" role="alert">{error}</div>}
+      {error !== undefined && <div className="dsh-taskboard-error" role="alert"><span>{error}</span><button type="button" aria-label={t.dismiss} onClick={() => { setError(undefined) }}><CloseIcon size={12} /></button></div>}
+      {snapshot?.tasksTruncated === true && <div className="dsh-taskboard-notice" role="status">{interpolate(t.tasksTruncated, { shown: snapshot.tasks.length, total: snapshot.taskTotal })}</div>}
       {busy && snapshot === undefined
         ? <div className="dsh-taskboard-loading">{t.loading}</div>
         : <div className="dsh-taskboard-content">
@@ -419,7 +490,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
               ? <div className="dsh-taskboard-empty"><p>{t.noProject}</p><ProjectCreate controller={controller} refresh={refresh} workspaces={workspaceState.items} /></div>
               : <>
                 <TaskCreate project={selected} mutate={mutate} onCreated={taskId => { controller.select(selected.id, route.view, taskId) }} />
-                {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} />}
+                {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} mutate={mutate} />}
                 {route.view === 'board' && <Board key={selected?.id ?? 'none'} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
                 {route.view === 'list' && <ListView tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
                 {route.view === 'labels' && <LabelsView project={selected} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
@@ -429,7 +500,17 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           </main>
         </div>}
       {logOpen && <AutomationLogDialog runs={snapshot?.automationRuns ?? []} tasks={tasks} close={() => { setLogOpen(false) }} />}
-      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={() => { controller.select(selected?.id, route.view) }} />}
+      {discardPrompt && <div className="dsh-taskboard-dialog-backdrop" onClick={event => { if (event.target === event.currentTarget) setDiscardPrompt(false) }}>
+        <div className="dsh-taskboard-discard-dialog" role="alertdialog" aria-modal="true" aria-label={t.unsavedChanges}>
+          <h2>{t.unsavedChanges}</h2>
+          <p>{t.unsavedBody}</p>
+          <div>
+            <button type="button" autoFocus onClick={() => { setDiscardPrompt(false) }}>{t.keepEditing}</button>
+            <button type="button" onClick={closeDetail}>{t.discardChanges}</button>
+          </div>
+        </div>
+      </div>}
+      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} preview={id => controller.previewAttachmentUrl(id)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
     </div>
   )
 }
@@ -550,16 +631,48 @@ function TaskCreate({ project, mutate, onCreated }: {
   return <form className="dsh-taskboard-create" onSubmit={submit}><input value={title} onChange={event => { setTitle(event.target.value) }} placeholder={t.newTask} aria-label={t.title} /><button type="submit" disabled={project === undefined}>{t.create}</button></form>
 }
 
-function Dashboard({ tasks, runs, project, storage, open, openLog }: {
+/** The integrity scan reads every database page, so it is an explicit action, never part of a refresh. */
+function StorageHealthPanel({ storage, mutate }: {
+  storage: TaskboardSnapshot['storageHealth']
+  mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>
+}) {
+  const t = useStrings()
+  const [checking, setChecking] = useState(false)
+  return (
+    <section className="dsh-taskboard-storage" data-status={storage.status}>
+      <header>
+        <h2>{t.storageHealth}</h2>
+        <div className="dsh-taskboard-storage-actions">
+          <strong>{storage.status === 'ok' ? t.healthy : t.degraded}</strong>
+          <button type="button" disabled={checking} onClick={() => {
+            setChecking(true)
+            void mutate('storage.check-integrity', {}).finally(() => { setChecking(false) })
+          }}>{t.recheckIntegrity}</button>
+        </div>
+      </header>
+      <span>SQLite: {storage.integrity} · schema v{storage.schemaVersion} · revision {storage.globalRevision}</span>
+      <span>{storage.taskCount} {t.tasksWord} · {storage.attachmentCount} {t.attachments} · {storage.attachmentBytes} {t.bytes}</span>
+      <span>{t.cleanupPending}: {storage.cleanupPending} · {t.cleanupStalled}: {storage.cleanupStalled} · {t.orphanedClaims}: {storage.orphanedClaims}</span>
+      <span>{t.lastChecked}: {storage.integrityCheckedAt === 0 ? t.never : new Date(storage.integrityCheckedAt).toLocaleString()}</span>
+    </section>
+  )
+}
+
+function Dashboard({ tasks, runs, project, storage, open, openLog, mutate }: {
   tasks: readonly TaskboardTask[]
   runs: readonly AutomationRun[]
   project: TaskboardProject | undefined
   storage: TaskboardSnapshot['storageHealth'] | undefined
   open: (task: TaskboardTask) => void
   openLog: () => void
+  mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>
 }) {
   const t = useStrings()
-  const counts = useMemo(() => Object.fromEntries(tasks.map(task => task.status).map(status => [status, tasks.filter(task => task.status === status).length])), [tasks])
+  const counts = useMemo(() => {
+    const tally: Partial<Record<TaskboardTask['status'], number>> = {}
+    for (const task of tasks) tally[task.status] = (tally[task.status] ?? 0) + 1
+    return tally
+  }, [tasks])
   const dueTasks = useMemo(() => [...tasks]
     .filter(task => task.dueDate !== undefined && task.status !== 'done' && task.status !== 'canceled')
     .sort((left, right) => String(left.dueDate).localeCompare(String(right.dueDate)))
@@ -567,7 +680,7 @@ function Dashboard({ tasks, runs, project, storage, open, openLog }: {
   const recentTasks = useMemo(() => [...tasks]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, 8), [tasks])
-  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${project.workspaceId}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.recentTasks}</h2>{recentTasks.length === 0 ? <p>{t.empty}</p> : recentTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{t[task.status]}</span></button>)}</section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <section className="dsh-taskboard-storage" data-status={storage.status}><header><h2>{t.storageHealth}</h2><strong>{storage.status === 'ok' ? t.healthy : t.degraded}</strong></header><span>SQLite: {storage.integrity} · schema v{storage.schemaVersion} · revision {storage.globalRevision}</span><span>{storage.taskCount} {t.tasksWord} · {storage.attachmentCount} {t.attachments} · {storage.attachmentBytes} {t.bytes}</span><span>{t.cleanupPending}: {storage.cleanupPending} · {t.orphanedClaims}: {storage.orphanedClaims}</span></section>}<AutomationLog runs={runs} tasks={tasks} openLog={openLog} /></>
+  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${project.workspaceId}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.recentTasks}</h2>{recentTasks.length === 0 ? <p>{t.empty}</p> : recentTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{t[task.status]}</span></button>)}</section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <StorageHealthPanel storage={storage} mutate={mutate} />}<AutomationLog runs={runs} tasks={tasks} openLog={openLog} /></>
 }
 
 function AutomationActions({ project, automations, defaults, mutate }: {
@@ -696,7 +809,8 @@ function Board({ tasks, open, mutate }: {
   const draggingRef = useRef(false)
   const dragged = tasks.find(task => task.id === draggedId)
   const applyDrop = (status: typeof TASK_STATUSES[number], target?: TaskboardTask): void => {
-    const intent = boardDropIntent(dragged, status, target)
+    const column = tasks.filter(task => task.status === status && task.archivedAt === undefined)
+    const intent = boardDropIntent(dragged, status, column, target)
     setDraggedId(undefined)
     if (intent.kind === 'reorder') {
       void mutate('task.update', {
@@ -796,10 +910,18 @@ function TaskCard({ task, open, drag }: {
 
 function ListView({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: TaskboardTask) => void }) {
   const t = useStrings()
-  const [sort, setSort] = useState<'identifier' | 'title' | 'status' | 'priority' | 'dueDate'>('identifier')
-  const ordered = [...tasks].sort((left, right) => String(left[sort] ?? '').localeCompare(String(right[sort] ?? ''), undefined, { numeric: true }))
-  const heading = (key: typeof sort, label: string) => <button type="button" onClick={() => { setSort(key) }}>{label}{sort === key ? ' ↑' : ''}</button>
-  return <div className="dsh-taskboard-table-wrap"><table><thead><tr><th>{heading('identifier', 'ID')}</th><th>{heading('title', t.title)}</th><th>{heading('status', t.status)}</th><th>{heading('priority', t.priority)}</th><th>{heading('dueDate', t.due)}</th></tr></thead><tbody>{ordered.map(task => <tr key={task.id} tabIndex={0} onClick={() => { open(task) }} onKeyDown={event => { if (event.key === 'Enter') open(task) }}><td>{task.identifier}</td><td>{task.title}</td><td>{t[task.status]}</td><td>{priorityLabel(t, task.priority)}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
+  const [sort, setSort] = useState<TaskListSortKey>('identifier')
+  const [direction, setDirection] = useState<'asc' | 'desc'>('asc')
+  const ordered = useMemo(() => sortTaskList(tasks, sort, direction), [tasks, sort, direction])
+  const heading = (key: TaskListSortKey, label: string) => (
+    <th aria-sort={sort === key ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => {
+        if (sort === key) setDirection(current => current === 'asc' ? 'desc' : 'asc')
+        else { setSort(key); setDirection('asc') }
+      }}>{label}{sort === key ? (direction === 'asc' ? ' ↑' : ' ↓') : ''}</button>
+    </th>
+  )
+  return <div className="dsh-taskboard-table-wrap"><table><thead><tr>{heading('identifier', 'ID')}{heading('title', t.title)}{heading('status', t.status)}{heading('priority', t.priority)}{heading('dueDate', t.due)}</tr></thead><tbody>{ordered.map(task => <tr key={task.id}><td><button type="button" className="dsh-taskboard-row-open" onClick={() => { open(task) }}>{task.identifier}</button></td><td>{task.title}</td><td>{t[task.status]}</td><td>{priorityLabel(t, task.priority)}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
 }
 
 function LabelsView({ project, tasks, open, mutate }: {
@@ -885,8 +1007,17 @@ function Gantt({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: 
   const [anchor, setAnchor] = useState(() => Date.now())
   const days = zoom === 'month' ? 30 : zoom === 'quarter' ? 90 : 365
   const start = anchor - ((days / 2) * 86_400_000)
-  const dated = tasks.filter(task => (task.startDate !== undefined || task.dueDate !== undefined) && (showCompleted || task.status !== 'done'))
   const point = (value: string | undefined, fallback: number): number => value === undefined ? fallback : new Date(`${value}T00:00:00`).getTime()
+  const end = start + (days * 86_400_000)
+  const dated = tasks.filter(task => {
+    if (task.startDate === undefined && task.dueDate === undefined) return false
+    if (!showCompleted && task.status === 'done') return false
+    // A task entirely outside the window used to be clamped to the left edge, drawing a bar that
+    // looked like work happening now. Leave it out of the window instead.
+    const taskStart = point(task.startDate, point(task.dueDate, anchor))
+    const taskEnd = Math.max(point(task.dueDate, taskStart + 86_400_000), taskStart + 86_400_000)
+    return taskEnd >= start && taskStart <= end
+  })
   return <div className="dsh-taskboard-gantt"><header><button type="button" onClick={() => { setAnchor(Date.now()) }}>{t.today}</button><select aria-label={t.ganttZoom} value={zoom} onChange={event => { setZoom(event.target.value as typeof zoom) }}><option value="month">{t.days30}</option><option value="quarter">{t.days90}</option><option value="year">{t.oneYear}</option></select><label><input type="checkbox" checked={showCompleted} onChange={event => { setShowCompleted(event.target.checked) }} />{t.showCompleted}</label></header><div className="dsh-taskboard-today" style={{ left: '50%' }} aria-hidden="true" />{dated.length === 0 ? <div className="dsh-taskboard-empty">{t.noDatedTasks}</div> : dated.map(task => {
     const taskStart = point(task.startDate, point(task.dueDate, anchor))
     const taskEnd = point(task.dueDate, taskStart + 86_400_000)
@@ -970,15 +1101,15 @@ function WorkflowEditor({ project, workflows, catalog, capabilities, mutate }: {
       id: `${kind}-${Date.now()}`, kind, execution: entry.execution, config: { target },
     }))
   }
-  return <div className="dsh-taskboard-workflows"><aside><form className="dsh-taskboard-workflow-create" onSubmit={create}><input aria-label="Workflow name" value={newWorkflowName} onChange={event => { setNewWorkflowName(event.target.value) }} placeholder="Workflow name" /><button type="submit" disabled={project === undefined || newWorkflowName.trim() === ''}>＋ {t.addWorkflow}</button></form>{workflows.map(item => <button type="button" className={item.id === selected?.id ? 'active' : ''} key={item.id} onClick={() => { setSelectedId(item.id) }}><strong>{item.name}</strong><small>v{item.version}</small></button>)}</aside><section>{selected === undefined || document === undefined ? <div className="dsh-taskboard-empty">{t.workflowNote}</div> : <><header><input aria-label="Saved workflow name" value={name} onChange={event => { setName(event.target.value) }} /><select aria-label="Node kind" value={nodeKind} onChange={event => { setNodeKind(event.target.value) }}>{stepEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" onClick={addStep}>＋ {t.addStep}</button><input aria-label="New tab name" value={newTabName} onChange={event => { setNewTabName(event.target.value) }} placeholder="Tab name" /><select aria-label="Trigger kind" value={triggerKind} onChange={event => { setTriggerKind(event.target.value) }}>{triggerEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" disabled={newTabName.trim() === ''} onClick={addTab}>＋ Tab</button><button type="button" onClick={() => { void mutate('workflow.update', { workflowId: selected.id, expectedVersion: selected.version, name, document }) }}>{t.save}</button><button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>×</button>{confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>Delete workflow?</span><button type="button" onClick={() => { void mutate('workflow.delete', { workflowId: selected.id, expectedVersion: selected.version }); setConfirmDelete(false) }}>Delete</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}</header><div className="dsh-taskboard-workflow-tabs">{document.tabs.map(tab => <article key={tab.id}><header><h3>{tab.name}</h3><button type="button" disabled={document.tabs.length <= 1} onClick={() => { setDocument(removeWorkflowTab(document, tab.id)) }}>× Tab</button></header><WorkflowNodeCard node={tab.trigger} tabId={tab.id} edit={editNode} trigger /><div className="dsh-taskboard-flow-line" />{tab.steps.map(node => <WorkflowNodeCard key={node.id} node={node} tabId={tab.id} edit={editNode} />)}</article>)}</div><footer>{catalog.map(item => <span key={item.kind} data-execution={item.execution}>{item.kind} · {item.execution === 'executable' ? t.executable : t.designOnly}</span>)}</footer><section className="dsh-taskboard-capabilities"><h3>Installed capabilities</h3><small>Skill discovery: {capabilities?.skillDiscoveryComplete === true ? 'complete' : 'refreshing/incomplete'}</small><div>{capabilities?.skills.map(skill => <button type="button" key={`skill-${skill.name}`} title={skill.description} onClick={() => { addCapability('skill', skill.name) }}>＋ Skill · {skill.name}</button>)}</div><div>{capabilities?.mcpTools.map(tool => <button type="button" key={`mcp-${tool.name}`} title={tool.description} onClick={() => { addCapability('mcp', tool.name) }}>＋ MCP · {tool.name}</button>)}</div></section></>}</section></div>
+  return <div className="dsh-taskboard-workflows"><aside><form className="dsh-taskboard-workflow-create" onSubmit={create}><input aria-label={t.workflowName} value={newWorkflowName} onChange={event => { setNewWorkflowName(event.target.value) }} placeholder={t.workflowName} /><button type="submit" disabled={project === undefined || newWorkflowName.trim() === ''}>＋ {t.addWorkflow}</button></form>{workflows.map(item => <button type="button" className={item.id === selected?.id ? 'active' : ''} key={item.id} onClick={() => { setSelectedId(item.id) }}><strong>{item.name}</strong><small>v{item.version}</small></button>)}</aside><section>{selected === undefined || document === undefined ? <div className="dsh-taskboard-empty">{t.workflowNote}</div> : <><header><input aria-label={t.workflowName} value={name} onChange={event => { setName(event.target.value) }} /><select aria-label={t.nodeKind} value={nodeKind} onChange={event => { setNodeKind(event.target.value) }}>{stepEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" onClick={addStep}>＋ {t.addStep}</button><input aria-label={t.newTabName} value={newTabName} onChange={event => { setNewTabName(event.target.value) }} placeholder={t.newTabName} /><select aria-label={t.triggerKind} value={triggerKind} onChange={event => { setTriggerKind(event.target.value) }}>{triggerEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" disabled={newTabName.trim() === ''} onClick={addTab}>＋ {t.tab}</button><button type="button" onClick={() => { void mutate('workflow.update', { workflowId: selected.id, expectedVersion: selected.version, name, document }) }}>{t.save}</button><button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>×</button>{confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>{t.deleteWorkflow}?</span><button type="button" onClick={() => { void mutate('workflow.delete', { workflowId: selected.id, expectedVersion: selected.version }); setConfirmDelete(false) }}>{t.delete}</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}</header><div className="dsh-taskboard-workflow-tabs">{document.tabs.map(tab => <article key={tab.id}><header><h3>{tab.name}</h3><button type="button" disabled={document.tabs.length <= 1} onClick={() => { setDocument(removeWorkflowTab(document, tab.id)) }}>× {t.tab}</button></header><WorkflowNodeCard node={tab.trigger} tabId={tab.id} edit={editNode} trigger /><div className="dsh-taskboard-flow-line" />{tab.steps.map(node => <WorkflowNodeCard key={node.id} node={node} tabId={tab.id} edit={editNode} />)}</article>)}</div><footer>{catalog.map(item => <span key={item.kind} data-execution={item.execution}>{item.kind} · {item.execution === 'executable' ? t.executable : t.designOnly}</span>)}</footer><section className="dsh-taskboard-capabilities"><h3>{t.installedCapabilities}</h3><small>{t.skillDiscovery}: {capabilities?.skillDiscoveryComplete === true ? t.completeWord : t.refreshing}</small><div>{capabilities?.skills.map(skill => <button type="button" key={`skill-${skill.name}`} title={skill.description} onClick={() => { addCapability('skill', skill.name) }}>＋ {t.skill} · {skill.name}</button>)}</div><div>{capabilities?.mcpTools.map(tool => <button type="button" key={`mcp-${tool.name}`} title={tool.description} onClick={() => { addCapability('mcp', tool.name) }}>＋ {t.mcp} · {tool.name}</button>)}</div></section></>}</section></div>
 }
 
 function WorkflowNodeCard({ node, tabId, edit, trigger = false }: { node: WorkflowDocument['tabs'][number]['trigger']; tabId: string; edit: (action: 'up' | 'down' | 'copy' | 'delete' | 'true' | 'false', tabId: string, nodeId: string) => void; trigger?: boolean }) {
   const t = useStrings()
-  return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>Copy</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ True</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ False</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>True</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>False</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
+  return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>{t.copy}</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ {t.trueLabel}</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ {t.falseLabel}</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>{t.trueLabel}</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>{t.falseLabel}</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
 }
 
-function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, openSession, openNewSession, close }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void }) {
+function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const t = useStrings()
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
@@ -1027,6 +1158,11 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
     || (recurrence !== '' && recurrenceInterval !== String(task.recurrence?.interval ?? 1))
     || (recurrence !== '' && recurrenceUntil !== (task.recurrence?.until ?? ''))
   const currentVersion = detail?.task.version ?? task.version
+  // Report upward so Escape and the backdrop can confirm before discarding these local edits.
+  useEffect(() => {
+    onDirtyChange(dirty)
+    return () => { onDirtyChange(false) }
+  }, [dirty, onDirtyChange])
   useEffect(() => {
     setTitle(task.title); setDescription(task.description); setPriority(task.priority); setLabels(task.labels.join(', '))
     setStartDate(task.startDate ?? ''); setDueDate(task.dueDate ?? ''); setRecurrence(task.recurrence?.frequency ?? '')
@@ -1134,7 +1270,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
                   </>}
             </section>
             <div className="dsh-taskboard-detail-feed">
-            {taskAttachments.length > 0 && <section className="dsh-taskboard-timeline-block" aria-label={t.attachments}>{taskAttachments.map(item => <article key={item.id} className="dsh-taskboard-attachment-row"><button type="button" className="dsh-taskboard-link" onClick={() => { void download(item.id, item.filename) }}>{item.filename}</button><small>{item.contentType} · {item.byteSize} {t.bytes}</small><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: item.id }) }}>{t.delete}</button></article>)}</section>}
+            {taskAttachments.length > 0 && <section className="dsh-taskboard-timeline-block" aria-label={t.attachments}>{taskAttachments.map(item => <AttachmentRow key={item.id} attachment={item} download={download} preview={preview} showMeta remove={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: item.id }) }} />)}</section>}
             <ol className="dsh-taskboard-timeline">
               {(detail?.comments ?? []).map(item =>
                 <li key={item.id} className="dsh-taskboard-timeline-comment">
@@ -1173,7 +1309,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
                           </>
                         : <MarkdownText value={item.body} />}
                       <label className="dsh-taskboard-file-label">{t.attachComment}<input type="file" onChange={event => { const file = event.target.files?.[0]; if (file !== undefined) void upload(file, item.id); event.target.value = '' }} /></label>
-                      {detail?.attachments.filter(attachment => attachment.commentId === item.id).map(attachment => <span key={attachment.id} className="dsh-taskboard-attachment-row"><button type="button" className="dsh-taskboard-link" onClick={() => { void download(attachment.id, attachment.filename) }}>{attachment.filename}</button><button type="button" onClick={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: attachment.id }) }}>{t.delete}</button></span>)}
+                      {detail?.attachments.filter(attachment => attachment.commentId === item.id).map(attachment => <AttachmentRow key={attachment.id} attachment={attachment} download={download} preview={preview} remove={() => { void mutate('attachment.delete', { taskId: task.id, expectedVersion: currentVersion, attachmentId: attachment.id }) }} />)}
                     </article>
                   </li>)}
             </ol>
@@ -1240,8 +1376,13 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
             <MetaField label={t.relations}>
               <div className="dsh-taskboard-relation-create"><select aria-label={t.relationKind} value={relationKind} onChange={event => { setRelationKind(event.target.value as typeof relationKind) }}><option value="parent">parent</option><option value="blocks">blocks</option><option value="related">related</option></select><select aria-label={t.relatedTask} value={relationTarget} onChange={event => { setRelationTarget(event.target.value) }}><option value="">{t.selectTask}</option>{tasks.filter(item => item.id !== task.id && item.projectId === task.projectId).map(item => <option key={item.id} value={item.id}>{item.identifier} · {item.title}</option>)}</select><button type="button" disabled={relationTarget === ''} onClick={() => { void mutate('task.relation', { taskId: task.id, expectedVersion: currentVersion, targetTaskId: relationTarget, kind: relationKind }).then(() => { setRelationTarget('') }) }}>{t.add}</button></div>
               {detail === undefined || detail.relations.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.relations.map(item => {
-                const sourceVersion = tasks.find(candidate => candidate.id === item.sourceTaskId)?.version
-                return <article key={item.id} className="dsh-taskboard-side-item"><strong>{relationLabel(item)}</strong><button type="button" disabled={sourceVersion === undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article>
+                // removeRelation checks the source task's version. For an outgoing relation that
+                // is this task, so prefer the detail version over the snapshot page, which may not
+                // contain the source at all.
+                const sourceVersion = item.sourceTaskId === task.id
+                  ? currentVersion
+                  : tasks.find(candidate => candidate.id === item.sourceTaskId)?.version
+                return <article key={item.id} className="dsh-taskboard-side-item"><strong>{relationLabel(item)}</strong><button type="button" disabled={sourceVersion === undefined} title={sourceVersion === undefined ? t.relationSourceUnloaded : undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article>
               })}
             </MetaField>
             <MetaField label={t.developmentContext}>
@@ -1368,14 +1509,14 @@ ${NAV_STYLES}
 .dsh-taskboard-header select,.dsh-taskboard-filters select,.dsh-taskboard-gantt>header select{height:36px;border-radius:18px}
 .dsh-taskboard-filters{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-filters input{flex:1;min-width:120px}
 .dsh-taskboard-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-tabs button{height:40px;padding:9px 16px 9px 12px;border:0;border-radius:12px;background:transparent}.dsh-taskboard-tabs button:hover{background:var(--dsw-specific-sidebar-nav-item-hover,#f1f3f5)}.dsh-taskboard-tabs button[aria-current=page]{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}
-.dsh-taskboard-error{padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-error{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-error button{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:transparent;color:inherit;cursor:pointer}.dsh-taskboard-error button:hover{background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.12))}.dsh-taskboard-notice{padding:8px 16px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-discard-dialog{width:min(400px,calc(100vw - 32px));padding:20px;border-radius:14px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18))}.dsh-taskboard-discard-dialog h2{margin:0 0 8px;font-size:15px;font-weight:600}.dsh-taskboard-discard-dialog p{margin:0 0 16px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-discard-dialog div{display:flex;justify-content:flex-end;gap:8px}.dsh-taskboard-discard-dialog button{min-height:34px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:17px;background:transparent;font:inherit;cursor:pointer}.dsh-taskboard-discard-dialog button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-attachment-row>div{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.dsh-taskboard-attachment-row img{display:block;max-width:100%;max-height:320px;margin-top:8px;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));border-radius:8px}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-content{display:flex;flex:1;min-height:0}.dsh-taskboard-view{flex:1;min-width:0;overflow:auto;padding:16px 24px 24px}
 .dsh-taskboard-create{display:flex;gap:8px;margin-bottom:16px}.dsh-taskboard-create input{flex:1}
 .dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-dashboard strong{font-size:30px;line-height:38px;font-weight:500}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#61666b)}
-.dsh-taskboard-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:12px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{display:flex;align-items:center;gap:8px;font-size:14px;line-height:22px;font-weight:500;margin:0 0 10px}.dsh-taskboard-board h2 small,.dsh-taskboard-other h2 small{margin-left:auto;color:var(--dsw-alias-label-tertiary,#81858c);font-weight:400}
+.dsh-taskboard-board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(240px,1fr);gap:12px;overflow-x:auto;overscroll-behavior-x:contain;align-items:start}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:12px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{display:flex;align-items:center;gap:8px;font-size:14px;line-height:22px;font-weight:500;margin:0 0 10px}.dsh-taskboard-board h2 small,.dsh-taskboard-other h2 small{margin-left:auto;color:var(--dsw-alias-label-tertiary,#81858c);font-weight:400}
 .dsh-taskboard-status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-status-dot[data-status=todo],.dsh-taskboard-status-dot[data-status=done]{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-status-dot[data-status=in_progress]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.dsh-taskboard-status-dot[data-status=in_review]{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-status-dot[data-status=blocked]{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-status-dot[data-status=canceled]{color:var(--dsw-alias-label-caption,#adb2b8)}.dsh-taskboard-status-dot[data-status=backlog]{color:var(--dsw-alias-label-tertiary,#81858c)}
 .dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more{width:100%;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;margin-top:4px;padding:6px 8px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more-label{font-size:12px;line-height:18px}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
-.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-table-wrap tbody tr{cursor:pointer}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
+.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-row-open{padding:0;border:0;background:transparent;color:var(--dsw-alias-link,#2563eb);font:inherit;text-align:left;cursor:pointer}.dsh-taskboard-row-open:hover{text-decoration:underline}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
 .dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-dialog-backdrop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.24));backdrop-filter:var(--dsw-mask-blur,blur(2px))}
 .dsh-taskboard-detail{width:min(1120px,100%);height:100%;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:0;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:24px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08));--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2,#d4d4d4);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2,#c4c4c4)}.dsh-taskboard-detail:focus{outline:none}
@@ -1389,13 +1530,13 @@ ${NAV_STYLES}
 .dsh-taskboard-meta-field{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-meta-field>span{font-size:12px;line-height:16px;font-weight:500;color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-meta-field>div{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-meta-project{padding:12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-meta-project h3{margin:0 0 4px;font-size:12px;line-height:16px;font-weight:500}.dsh-taskboard-meta-project>p{margin:0 0 8px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-meta-nested{padding:8px 0;border-bottom:0}.dsh-taskboard-meta-nested+.dsh-taskboard-meta-nested{border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-detail-side input,.dsh-taskboard-detail-side select{height:32px;border-color:transparent;background:transparent;padding-left:8px}.dsh-taskboard-detail-side input:hover,.dsh-taskboard-detail-side select:hover,.dsh-taskboard-detail-side input:focus,.dsh-taskboard-detail-side select:focus{border-color:var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-bg-layer-1,#fff)}.dsh-taskboard-detail-side .dsh-taskboard-actions{flex-direction:column;align-items:stretch;padding-top:12px}.dsh-taskboard-detail-side .dsh-taskboard-actions button{width:100%}.dsh-taskboard-side-item{display:flex;flex-direction:column;gap:4px;align-items:flex-start}.dsh-taskboard-side-item small{color:var(--dsw-alias-label-tertiary,#81858c);overflow-wrap:anywhere}
 .dsh-taskboard-automation-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:12;display:flex;flex-direction:column;gap:8px;width:min(520px,calc(100vw - 32px));max-height:min(70vh,640px);overflow:auto;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-automation-menu>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.dsh-taskboard-popover-actions{display:flex;align-items:center;gap:6px}.dsh-taskboard-automation-menu button.dsh-taskboard-popover-close{width:28px;height:28px;min-width:28px;min-height:28px;padding:0;border:0;border-radius:28px}.dsh-taskboard-automation-menu h2{margin:0;font-size:14px;line-height:22px;font-weight:500}.dsh-taskboard-automation-menu article{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-automation-menu article>div{display:flex;flex:1;flex-direction:column}.dsh-taskboard-automation-menu article>div:last-of-type{display:flex;flex:0 0 auto;flex-direction:row;gap:6px}.dsh-taskboard-automation-menu article small,.dsh-taskboard-automation-menu article span,.dsh-taskboard-automation-menu>p{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-log{display:flex;flex-direction:column;gap:6px;margin-top:18px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px}.dsh-taskboard-log header{display:flex;align-items:center;justify-content:space-between}.dsh-taskboard-log h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-log>p{margin:0;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-log ol,.dsh-taskboard-log-dialog ol{list-style:none;margin:0;padding:0}.dsh-taskboard-log li,.dsh-taskboard-log-dialog li{display:flex;flex-direction:column;gap:2px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-log li:first-child,.dsh-taskboard-log-dialog li:first-child{border-top:0}.dsh-taskboard-log time,.dsh-taskboard-log-dialog time{color:var(--dsw-alias-label-tertiary,#81858c);font-size:12px;line-height:18px}.dsh-taskboard-log span,.dsh-taskboard-log-dialog span{color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-log li[data-kind=claimed] span,.dsh-taskboard-log-dialog li[data-kind=claimed] span{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-log li[data-kind=error] span,.dsh-taskboard-log li[data-kind=quota-paused] span,.dsh-taskboard-log-dialog li[data-kind=error] span,.dsh-taskboard-log-dialog li[data-kind=quota-paused] span{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-log-dialog{width:min(720px,100%);max-height:min(80vh,720px);display:flex;flex-direction:column;overflow:hidden;border-radius:16px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-log-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none;padding:16px 16px 12px 20px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-log-dialog h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-log-dialog ol{overflow:auto;padding:0 20px 16px}.dsh-taskboard-log-dialog>p{margin:0;padding:16px 20px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-log header .dsh-taskboard-link{min-height:0;padding:0}.dsh-taskboard-log-dialog button.dsh-taskboard-detail-close{width:28px;min-width:28px;height:28px;min-height:28px;padding:0;border:0;border-radius:28px}
-.dsh-taskboard-storage{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;padding:12px;border:1px solid var(--dsw-alias-state-success-primary,#22c55e);border-radius:12px;background:var(--dsw-alias-state-success-tertiary,#e6faed)}.dsh-taskboard-storage[data-status=degraded]{border-color:var(--dsw-alias-state-warn-primary,#f59e0b);background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-storage header{display:flex;flex:1 0 100%;align-items:center;justify-content:space-between}.dsh-taskboard-storage h2{margin:0;font-size:14px;font-weight:500}.dsh-taskboard-storage span{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-storage{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;padding:12px;border:1px solid var(--dsw-alias-state-success-primary,#22c55e);border-radius:12px;background:var(--dsw-alias-state-success-tertiary,#e6faed)}.dsh-taskboard-storage[data-status=degraded]{border-color:var(--dsw-alias-state-warn-primary,#f59e0b);background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-storage header{display:flex;flex:1 0 100%;align-items:center;justify-content:space-between}.dsh-taskboard-storage-actions{display:flex;align-items:center;gap:10px}.dsh-taskboard-storage-actions button{min-height:28px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:14px;background:transparent;font:inherit;cursor:pointer}.dsh-taskboard-storage-actions button:disabled{opacity:.5;cursor:default}.dsh-taskboard-storage h2{margin:0;font-size:14px;font-weight:500}.dsh-taskboard-storage span{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-workflows,.dsh-taskboard-labels{display:grid;grid-template-columns:190px 1fr;min-height:420px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;overflow:hidden}.dsh-taskboard-workflows>aside,.dsh-taskboard-labels>aside{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-workflows>aside button,.dsh-taskboard-labels>aside button{display:flex;justify-content:space-between;padding:9px 12px;border:1px solid transparent;border-radius:12px;background:transparent;text-align:left;min-height:40px}.dsh-taskboard-workflows>aside button.active,.dsh-taskboard-labels>aside button.active{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}.dsh-taskboard-workflows>section,.dsh-taskboard-labels>section{padding:14px;overflow:auto}.dsh-taskboard-workflows>section>header,.dsh-taskboard-labels>section>header{display:flex;gap:8px;position:relative;flex-wrap:wrap}.dsh-taskboard-workflows>section>header input,.dsh-taskboard-labels>section>header input{flex:1;min-width:120px}.dsh-taskboard-labels>section h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-workflow-tabs{display:flex;gap:20px;padding:20px 0}.dsh-taskboard-workflow-tabs>article{min-width:240px}.dsh-taskboard-workflow-tabs>article>header{display:flex;align-items:center;justify-content:space-between}.dsh-taskboard-workflow-node{margin:8px 0;padding:11px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-workflow-node[data-execution=executable]{border-color:var(--dsw-alias-state-success-primary,#22c55e);background:var(--dsw-alias-state-success-tertiary,#e6faed)}.dsh-taskboard-workflow-node>small{display:block;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-flow-line{height:20px;margin-left:28px;border-left:2px solid var(--dsw-alias-border-l3,rgba(0,0,0,.12))}.dsh-taskboard-branches{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.dsh-taskboard-workflows footer{display:flex;flex-wrap:wrap;gap:5px}.dsh-taskboard-workflows footer span{padding:3px 6px;border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);font-size:11px}.dsh-taskboard-workflows footer span[data-execution=executable]{background:var(--dsw-alias-state-success-tertiary,#e6faed)}
 .dsh-taskboard-workflow-node-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.dsh-taskboard-workflow-node-actions button{padding:2px 8px;min-height:22px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:11px;background:transparent;font-size:11px}
 .dsh-taskboard-capabilities{margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-capabilities h3{margin:0 0 5px;font-weight:500}.dsh-taskboard-capabilities>div{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .dsh-taskboard-markdown{overflow-wrap:anywhere}.dsh-taskboard-markdown h1,.dsh-taskboard-markdown h2,.dsh-taskboard-markdown h3,.dsh-taskboard-markdown h4{margin:16px 0 8px;font-weight:600;line-height:1.35}.dsh-taskboard-markdown h1:first-child,.dsh-taskboard-markdown h2:first-child,.dsh-taskboard-markdown h3:first-child,.dsh-taskboard-markdown h4:first-child{margin-top:0}.dsh-taskboard-markdown h1{font-size:22px;line-height:30px}.dsh-taskboard-markdown h2{font-size:18px;line-height:26px}.dsh-taskboard-markdown h3{font-size:16px;line-height:24px}.dsh-taskboard-markdown h4{font-size:14px;line-height:22px}.dsh-taskboard-markdown p{margin:0 0 8px;white-space:pre-wrap}.dsh-taskboard-markdown p:last-child{margin-bottom:0}.dsh-taskboard-markdown ul,.dsh-taskboard-markdown ol{margin:0 0 8px;padding-left:1.4em}.dsh-taskboard-markdown li{margin:2px 0;white-space:pre-wrap}.dsh-taskboard-markdown blockquote{margin:0 0 8px;padding:0 12px;border-left:3px solid var(--dsw-alias-border-l3,rgba(0,0,0,.12));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-markdown a{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-markdown img{display:block;max-width:100%;height:auto;margin:8px 0;border-radius:8px}.dsh-taskboard-markdown code{padding:1px 5px;border-radius:4px;background:var(--dsw-alias-markdown-code-block,#f9fafb);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.dsh-taskboard-markdown pre{overflow:auto;padding:8px;border-radius:8px;background:var(--dsw-alias-markdown-code-block,#f9fafb)}.dsh-taskboard-markdown pre code{padding:0;background:transparent}.dsh-taskboard-markdown hr{border:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));margin:12px 0}
 .dsh-taskboard-popover{position:relative}.dsh-taskboard-popover>form,.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;display:flex;flex-direction:column;gap:8px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-popover form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-popover form div,.dsh-taskboard-inline-form{display:flex;gap:7px}.dsh-taskboard-confirm{position:relative;top:auto;right:auto;width:auto;margin:8px 0}.dsh-taskboard-popover>.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;width:280px;margin:0}.dsh-taskboard-reason{padding:12px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-reason label{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-relation-create{display:grid;grid-template-columns:1fr;gap:6px}.dsh-taskboard-inline-form{align-items:end;padding:10px 0}.dsh-taskboard-inline-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-workflow-create{display:flex;flex-direction:column;gap:5px}.dsh-taskboard-workflow-create input{min-width:0}
 .dsh-taskboard-summary,.dsh-taskboard-due{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px}.dsh-taskboard-summary h2,.dsh-taskboard-due h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-due button{display:flex;justify-content:space-between;gap:12px;padding:8px;border:0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:0;background:transparent;text-align:left;min-height:0}.dsh-taskboard-automation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;flex:1 0 100%;padding:10px 0}.dsh-taskboard-automation-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-automation-form label:has(input[type="checkbox"]){flex-direction:row;align-items:center}
-@media(max-width:900px){.dsh-taskboard-dashboard{grid-template-columns:repeat(2,1fr)}.dsh-taskboard-board{grid-template-columns:1fr}.dsh-taskboard-dialog-backdrop{padding:12px}.dsh-taskboard-detail{height:min(100%,calc(100vh - 24px));border-radius:16px}.dsh-taskboard-detail-columns{grid-template-columns:1fr}.dsh-taskboard-detail-side{border-left:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-header{gap:5px}.dsh-taskboard-gantt button{grid-template-columns:1fr}}
+@media(max-width:900px){.dsh-taskboard-dashboard{grid-template-columns:repeat(2,1fr)}.dsh-taskboard-board{grid-auto-flow:row;grid-auto-columns:auto;grid-template-columns:1fr;overflow-x:visible}.dsh-taskboard-dialog-backdrop{padding:12px}.dsh-taskboard-detail{height:min(100%,calc(100vh - 24px));border-radius:16px}.dsh-taskboard-detail-columns{grid-template-columns:1fr}.dsh-taskboard-detail-side{border-left:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-header{gap:5px}.dsh-taskboard-gantt button{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.dsh-taskboard-page *{scroll-behavior:auto!important;transition:none!important}}
 `

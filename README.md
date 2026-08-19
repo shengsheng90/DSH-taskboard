@@ -324,7 +324,8 @@ On the Taskboard page, create an automation for a project: interval, Agent prese
 |---|---|---|
 | `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE` |
 | `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS` |
-| `pageSize` | `100` | Bounded list page |
+| `pageSize` | `100` | Bounded `taskboard_list` page; the result reports the matching total |
+| `snapshotTaskLimit` | `1000` | Tasks per web snapshot; the page reports when it was truncated |
 | `maxAttachmentBytes` | `26214400` | Per file (25 MiB) |
 | `maxTaskAttachmentBytes` | `104857600` | Per task (100 MiB) |
 | `minAutomationIntervalMs` | `30000` | Floor for automation interval |
@@ -336,7 +337,9 @@ On the Taskboard page, create an automation for a project: interval, Agent prese
 | `maxChangeWatchMs` | `30000` | Long-poll timeout |
 | `defaultAgentPreset` | `standard` | Worker preset |
 
-Attachment content types and sizes are validated before publication. Dashboard and `storage status` share the same bounded SQLite integrity, revision, count, attachment-cleanup, and orphaned-claim diagnostics.
+Attachment content types and sizes are validated before publication. Downloads stream from disk. Dashboard and `storage status` share the same bounded SQLite integrity, revision, count, attachment-cleanup, and orphaned-claim diagnostics.
+
+The SQLite integrity scan reads every database page, so it never runs on the snapshot path: it runs once when the database opens and on the dashboard's explicit re-check. `storageHealth.integrityCheckedAt` reports when the reported result was measured.
 
 While the page is open, the plugin waits on the next committed global revision over the existing Typert connection. Timeout polling and periodic snapshots are recovery paths. This does not require changing the Harness Host-event allowlist.
 

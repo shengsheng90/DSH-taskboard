@@ -361,11 +361,17 @@ test('validates and round-trips recurrence while exposing bounded storage health
       recurrence: { frequency: 'weekly', interval: 2, until: '2026-12-31' },
     }, human)
     assert.deepEqual(provider.getTask(task.id).recurrence, { frequency: 'weekly', interval: 2, until: '2026-12-31' })
-    assert.deepEqual(provider.storageHealth(), {
-      status: 'ok', integrity: 'ok', schemaVersion: 3, globalRevision: 2,
+    const { integrityCheckedAt, ...health } = provider.storageHealth()
+    assert.deepEqual(health, {
+      status: 'ok', integrity: 'ok', schemaVersion: 4, globalRevision: 2,
       projectCount: 1, taskCount: 1, attachmentCount: 0, attachmentBytes: 0,
-      cleanupPending: 0, orphanedClaims: 0,
+      cleanupPending: 0, cleanupStalled: 0, orphanedClaims: 0,
     })
+    // The scan runs once when the database opens; storageHealth() must never re-run it.
+    assert.ok(integrityCheckedAt > 0)
+    assert.equal(provider.storageHealth().integrityCheckedAt, integrityCheckedAt)
+    assert.equal(provider.refreshIntegrity(), 'ok')
+    assert.ok(provider.storageHealth().integrityCheckedAt >= integrityCheckedAt)
     assert.throws(() => provider.updateTask(task.id, task.version, {
       recurrence: { frequency: 'weekly', interval: 0 },
     }, human), expectCode('TASK_INVALID_INPUT'))
@@ -477,6 +483,57 @@ test('records automation run history when a scheduler decision is persisted', ()
     assert.equal(runs.length, 2)
     assert.equal(runs[0]?.decision.kind, 'claimed')
     assert.equal(runs[1]?.decision.kind, 'empty')
+  } finally {
+    provider.close()
+  }
+})
+
+test('task detail bounds the activity log and always reports its true size', () => {
+  const provider = memoryProvider()
+  try {
+    const task = seed(provider)
+    let version = task.version
+    for (let index = 0; index < 12; index += 1) {
+      version = provider.updateTask(task.id, version, { description: `revision ${index}` }, human).version
+    }
+    // 1 creation + 12 updates
+    const full = provider.getTaskDetail(task.id)
+    assert.equal(full.activityTotal, 13)
+    assert.equal(full.activities.length, 13)
+
+    const windowed = provider.getTaskDetail(task.id, { activityLimit: 4 })
+    assert.equal(windowed.activityTotal, 13)
+    assert.equal(windowed.activities.length, 4)
+    // Newest rows, still presented oldest-first.
+    assert.deepEqual(windowed.activities.map(activity => activity.kind), Array.from({ length: 4 }, () => 'task.updated'))
+    assert.deepEqual(
+      windowed.activities.map(activity => activity.id),
+      full.activities.slice(-4).map(activity => activity.id),
+    )
+
+    const omitted = provider.getTaskDetail(task.id, { activityLimit: 0 })
+    assert.deepEqual(omitted.activities, [])
+    assert.equal(omitted.activityTotal, 13)
+  } finally {
+    provider.close()
+  }
+})
+
+test('countTasks reports totals independently of the requested page', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    for (let index = 0; index < 7; index += 1) {
+      provider.createTask({ projectId: project.id, title: `Task ${index}`, creator: human.actorId }, human)
+    }
+    const first = provider.createTask({ projectId: project.id, title: 'Archived', creator: human.actorId }, human)
+    provider.archive(first.id, first.version, human)
+
+    assert.equal(provider.listTasks({ projectId: project.id, limit: 3 }).length, 3)
+    assert.equal(provider.countTasks({ projectId: project.id }), 7)
+    assert.equal(provider.countTasks({ projectId: project.id, includeArchived: true }), 8)
+    assert.equal(provider.countTasks({ projectId: project.id, statuses: ['todo'] }), 0)
+    assert.equal(provider.countTasks({ projectId: project.id, search: 'Task 3' }), 1)
   } finally {
     provider.close()
   }

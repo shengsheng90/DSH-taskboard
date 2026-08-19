@@ -30,7 +30,7 @@ export function taskboardToolDefinitions(service: TaskboardService): ToolDefinit
   return [
     defineTool({
       name: 'taskboard_list',
-      description: 'List bounded current tasks for one exact project. Read before selecting or mutating work.',
+      description: 'List bounded current tasks for one exact project. Read before selecting or mutating work. The result reports the matching total; pass offset to read past one page.',
       parameters: {
         project_id: { type: 'string', required: true },
         statuses: {
@@ -39,16 +39,23 @@ export function taskboardToolDefinitions(service: TaskboardService): ToolDefinit
         },
         include_archived: { type: 'boolean' },
         search: { type: 'string' },
+        offset: { type: 'integer' },
       },
       output: JSON_OUTPUT,
       execute(args) {
-        return Promise.resolve(asJson(service.provider.listTasks({
+        const filter = {
           projectId: ProjectId(args.project_id),
           ...(args.statuses === undefined ? {} : { statuses: args.statuses as TaskStatus[] }),
           ...(args.include_archived === undefined ? {} : { includeArchived: args.include_archived }),
           ...(args.search === undefined ? {} : { search: args.search }),
-          limit: service.config.pageSize,
-        })))
+        }
+        const offset = Math.max(0, args.offset ?? 0)
+        const tasks = service.provider.listTasks({ ...filter, limit: service.config.pageSize, offset })
+        return Promise.resolve(asJson({
+          tasks,
+          offset,
+          total: service.provider.countTasks(filter),
+        }))
       },
       presentCall: args => present('List Taskboard issues', args.project_id),
     }),

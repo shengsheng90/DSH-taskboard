@@ -172,6 +172,21 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
     await Promise.allSettled(handles.map(handle => handle.dispose()))
   }
 
+  /** Drop and dispose one tracked Agent handle; safe to call for a session already released. */
+  private async release(sessionId: string): Promise<void> {
+    const handle = this.handles.get(sessionId)
+    if (handle === undefined) return
+    this.handles.delete(sessionId)
+    await handle.dispose().catch(() => undefined)
+  }
+
+  /** Release a handle only once its Session no longer owns an active claim. */
+  private async releaseUnclaimed(sessionId: string): Promise<void> {
+    const owned = this.taskboard.provider.listClaims(['active', 'orphaned'])
+      .some(claim => claim.sessionId === sessionId)
+    if (!owned) await this.release(sessionId)
+  }
+
   private async launch(rule: AutomationRule, task: TaskboardTask, initialClaim: TaskboardClaim, resume: boolean): Promise<void> {
     const owner = actor(rule, initialClaim)
     let handle: AgentHandle | undefined
@@ -214,11 +229,13 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
         source: { kind: 'taskboard', taskId: task.id, claimId: claim.id, claimedRevision: current.version },
       }))
       await handle.agent.whenIdle()
+      // Idle does not mean finished: while the claim is still active, onTaskChanged must be able
+      // to push committed human edits into this Session, so the handle stays. Once the claim is
+      // gone the handle is dead weight -- keeping those was what grew one handle per completed
+      // task for the lifetime of the Host.
+      await this.releaseUnclaimed(initialClaim.sessionId)
     } catch (error) {
-      if (handle !== undefined) {
-        this.handles.delete(initialClaim.sessionId)
-        await handle.dispose().catch(() => undefined)
-      }
+      if (handle !== undefined) await this.release(initialClaim.sessionId)
       const latest = this.taskboard.provider.getTask(task.id)
       if (latest.status === 'in_progress') {
         try { this.taskboard.provider.releaseClaim(latest.id, latest.version, `worker startup failed: ${String(error)}`, owner) } catch (_preserveOriginal) { /* authoritative state remains inspectable */ }
@@ -244,7 +261,11 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
       )
     } else if (goal.phase === 'blocked') {
       this.taskboard.provider.block(task.id, task.version, goal.blockedReason?.message ?? 'Harness Goal blocked', owner)
+    } else {
+      return
     }
+    // Review submission and blocking both retire the claim, so this worker is done with the Session.
+    void this.releaseUnclaimed(claim.sessionId)
   }
 
   private onTaskChanged(event: TaskboardChangeEvent): void {

@@ -47,3 +47,34 @@ test('claim and review tools derive ownership from the executing Agent', async (
     service.provider.close()
   }
 })
+
+test('taskboard_list reports the matching total and pages with offset', async () => {
+  const service = new TaskboardService(new Context(), {
+    databasePath: ':memory:', attachmentRoot: '.dsh/test', pageSize: 2,
+  })
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    for (let index = 0; index < 5; index += 1) {
+      service.provider.createTask({ projectId: project.id, title: `Task ${index}`, creator: human.actorId }, human)
+    }
+    const list = taskboardToolDefinitions(service).find(tool => tool.name === 'taskboard_list')!
+    const exec = { agent: { id: 'session-1' } } as never
+
+    type Page = { tasks: { identifier: string }[]; offset: number; total: number }
+    const first = await list.execute({ project_id: project.id }, exec) as Page
+    assert.equal(first.total, 5)
+    assert.equal(first.offset, 0)
+    assert.equal(first.tasks.length, 2)
+
+    // Without offset the model could never reach the tasks past the first page.
+    const third = await list.execute({ project_id: project.id, offset: 4 }, exec) as Page
+    assert.equal(third.total, 5)
+    assert.equal(third.tasks.length, 1)
+    assert.notEqual(third.tasks[0]?.identifier, first.tasks[0]?.identifier)
+
+    const filtered = await list.execute({ project_id: project.id, statuses: ['todo'] }, exec) as Page
+    assert.equal(filtered.total, 0)
+  } finally {
+    service.provider.close()
+  }
+})

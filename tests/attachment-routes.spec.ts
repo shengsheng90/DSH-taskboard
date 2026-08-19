@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Writable } from 'node:stream'
 import test from 'node:test'
 import { SqliteTaskboardProvider } from '../src/index.js'
 import { TaskboardAttachmentRoutes } from '../src/service/attachments.js'
@@ -11,22 +11,25 @@ import { TaskboardAttachmentRoutes } from '../src/service/attachments.js'
 function responseCapture() {
   let status = 0
   let headers: Record<string, string | number> = {}
-  let body = Buffer.alloc(0)
-  const target = {
-    headersSent: false,
-    writeHead(nextStatus: number, nextHeaders: Record<string, string | number>) {
-      status = nextStatus
-      headers = nextHeaders
-      target.headersSent = true
-      return target
+  const chunks: Buffer[] = []
+  const target = new Writable({
+    write(chunk: Buffer | string, _encoding, callback) {
+      chunks.push(Buffer.from(chunk as Buffer))
+      callback()
     },
-    end(value?: string | Uint8Array) {
-      body = value === undefined ? Buffer.alloc(0) : Buffer.from(value)
-      return target
-    },
+  }) as Writable & {
+    headersSent: boolean
+    writeHead(status: number, headers: Record<string, string | number>): unknown
+  }
+  target.headersSent = false
+  target.writeHead = (nextStatus, nextHeaders) => {
+    status = nextStatus
+    headers = nextHeaders
+    target.headersSent = true
+    return target
   }
   const response = target as unknown as ServerResponse
-  return { response, read: () => ({ status, headers, body }) }
+  return { response, read: () => ({ status, headers, body: Buffer.concat(chunks) }) }
 }
 
 function request(method: string, url: string, body?: Uint8Array): IncomingMessage {
@@ -71,6 +74,48 @@ test('attachment byte route uses expiring single-use upload and download capabil
     assert.equal(downloaded.body.toString(), 'verified')
     assert.equal(downloaded.headers['x-content-type-options'], 'nosniff')
     assert.match(String(downloaded.headers['content-disposition']), /^attachment;/)
+  } finally {
+    provider.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('a download ticket streams a larger attachment and refuses a corrupted stored file', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-stream-'))
+  const provider = new SqliteTaskboardProvider(join(directory, 'taskboard.sqlite'), {
+    root: join(directory, 'attachments'), maxAttachmentBytes: 512 * 1024, maxTaskAttachmentBytes: 1024 * 1024,
+    allowedContentTypes: ['application/octet-stream'], allowSharedWorktrees: false,
+  })
+  const human = { kind: 'human' as const, actorId: 'web-user' }
+  let handler: ((request: IncomingMessage, response: ServerResponse) => void | Promise<void>) | undefined
+  const routes = new TaskboardAttachmentRoutes(provider)
+  routes.mount({ register(route: { handler: typeof handler }) { handler = route.handler; return () => undefined } } as never)
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    const task = provider.createTask({ projectId: project.id, title: 'Bytes', creator: human.actorId }, human)
+    // Larger than one stream chunk, so the response is assembled from several writes.
+    const bytes = new Uint8Array(200_000).fill(7)
+    const created = provider.createAttachment(task.id, task.version, {
+      filename: 'blob.bin', contentType: 'application/octet-stream', bytes,
+    }, human)
+
+    const download = routes.issueDownload(created.attachment.id, 'attachment')
+    const captured = responseCapture()
+    await handler!(request('GET', download.url), captured.response)
+    const result = captured.read()
+    assert.equal(result.status, 200)
+    assert.equal(result.body.byteLength, bytes.byteLength)
+    assert.equal(result.headers['content-length'], String(bytes.byteLength))
+    assert.ok(result.body.every(value => value === 7))
+
+    // A stored file that disagrees with the authority row must fail before any body is written.
+    const storage = readdirSync(join(directory, 'attachments'), { recursive: true, withFileTypes: true })
+      .find(entry => entry.isFile())!
+    writeFileSync(join(storage.parentPath, storage.name), Buffer.from([1, 2, 3]))
+    const corrupted = responseCapture()
+    await handler!(request('GET', routes.issueDownload(created.attachment.id, 'attachment').url), corrupted.response)
+    assert.equal(corrupted.read().status, 400)
+    assert.match(corrupted.read().body.toString(), /ATTACHMENT_STORAGE_FAILURE/)
   } finally {
     provider.close()
     rmSync(directory, { recursive: true, force: true })

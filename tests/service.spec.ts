@@ -334,3 +334,69 @@ test('human RPC can run an automation immediately without moving its schedule', 
     service.provider.close()
   }
 })
+
+test('snapshot reports a truncated task page instead of hiding tasks silently', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { ...config, snapshotTaskLimit: 3 })
+  const actor = { kind: 'human', actorId: 'test-human' } as const
+  try {
+    const created = service.dispatchHumanRpc('project.create', { request: { key: 'DSH', name: 'Harness' } }, actor)
+    assert.equal(created.ok, true)
+    if (!created.ok) return
+    const project = created.value as { id: string }
+    for (let index = 0; index < 5; index += 1) {
+      assert.equal(service.dispatchHumanRpc('task.create', {
+        request: { projectId: project.id, title: `Task ${index}`, creator: 'test-human' },
+      }, actor).ok, true)
+    }
+
+    const snapshot = service.snapshot(project.id as never)
+    assert.equal(snapshot.tasks.length, 3)
+    assert.equal(snapshot.taskTotal, 5)
+    assert.equal(snapshot.tasksTruncated, true)
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('snapshot falls back to the first project when the requested one no longer exists', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  const actor = { kind: 'human', actorId: 'test-human' } as const
+  try {
+    const created = service.dispatchHumanRpc('project.create', { request: { key: 'DSH', name: 'Harness' } }, actor)
+    assert.equal(created.ok, true)
+    if (!created.ok) return
+    const project = created.value as { id: string }
+
+    // A stale deep link or a project deleted elsewhere must not fail the whole page.
+    const snapshot = service.snapshot('project-does-not-exist' as never)
+    assert.equal(snapshot.projects.length, 1)
+    assert.equal(snapshot.projects[0]?.id, project.id)
+    assert.deepEqual(snapshot.tasks, [])
+    assert.equal(snapshot.taskTotal, 0)
+    assert.equal(snapshot.tasksTruncated, false)
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('the integrity scan is explicit and never rides along on a snapshot', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  const actor = { kind: 'human', actorId: 'test-human' } as const
+  try {
+    const opened = service.snapshot().storageHealth
+    assert.equal(opened.integrity, 'ok')
+    assert.ok(opened.integrityCheckedAt > 0)
+    assert.equal(service.snapshot().storageHealth.integrityCheckedAt, opened.integrityCheckedAt)
+
+    const rechecked = service.dispatchHumanRpc('storage.check-integrity', {}, actor)
+    assert.equal(rechecked.ok, true)
+    if (!rechecked.ok) return
+    assert.equal((rechecked.value as { integrity: string }).integrity, 'ok')
+    assert.ok((rechecked.value as { integrityCheckedAt: number }).integrityCheckedAt >= opened.integrityCheckedAt)
+  } finally {
+    service.provider.close()
+  }
+})

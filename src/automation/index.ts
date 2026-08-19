@@ -200,7 +200,9 @@ export class TaskboardAutomationCoordinator {
     const globalAvailable = Math.max(0, this.taskboard.config.maxGlobalWorkers - this.inFlight.size)
     const projectRunning = this.runningByProject.get(rule.projectId) ?? 0
     const projectAvailable = Math.max(0, this.taskboard.config.maxProjectWorkers - projectRunning)
-    const ruleAvailable = Math.max(0, rule.config.concurrencyLimit - projectRunning)
+    // The rule's own limit counts the rule's own workers. Measuring it against the project total
+    // let a sibling rule in the same project silently consume this rule's budget.
+    const ruleAvailable = Math.max(0, rule.config.concurrencyLimit - this.ruleInFlight(String(rule.id)).size)
     return Math.min(globalAvailable, projectAvailable, ruleAvailable)
   }
 
@@ -223,6 +225,7 @@ export class TaskboardAutomationCoordinator {
       this.decrement(projectId)
       throw error
     }
+    const ruleTracking = this.ruleInFlight(ruleId)
     const tracked = run.catch(async (error: unknown) => {
       const latest = this.taskboard.provider.getAutomation(rule.id)
       if (latest.state === 'enabled') {
@@ -232,11 +235,13 @@ export class TaskboardAutomationCoordinator {
       }
     }).finally(() => {
       this.inFlight.delete(tracked)
-      this.ruleInFlight(ruleId).delete(tracked)
+      ruleTracking.delete(tracked)
+      // Drop the per-rule bucket once it empties so a deleted rule leaves nothing behind.
+      if (ruleTracking.size === 0) this.inFlightByRule.delete(ruleId)
       this.decrement(projectId)
     })
     this.inFlight.add(tracked)
-    this.ruleInFlight(ruleId).add(tracked)
+    ruleTracking.add(tracked)
   }
 
   private decrement(projectId: string): void {

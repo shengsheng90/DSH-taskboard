@@ -1,6 +1,7 @@
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TaskboardSnapshot } from '../service/index.js'
+import { TASK_STATUSES } from '../domain/index.js'
 import type {
   TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
 } from '../domain/index.js'
@@ -27,21 +28,57 @@ export function previewAutomationRuns<T>(runs: readonly T[], limit = AUTOMATION_
   return { preview: runs.slice(0, limit), remaining: Math.max(0, runs.length - limit) }
 }
 
-/** Newest-first page of one board column; later clicks reveal another page of older cards. */
-export function paginateBoardColumn<T extends { readonly updatedAt: number; readonly createdAt: number; readonly id: string }>(
-  tasks: readonly T[],
-  visibleCount = BOARD_COLUMN_PAGE_SIZE,
-): { readonly visible: readonly T[]; readonly remaining: number } {
-  const ordered = [...tasks].sort((left, right) => {
-    if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt
+export interface BoardOrderedTask {
+  readonly sortOrder: number
+  readonly createdAt: number
+  readonly id: string
+}
+
+/** Authoritative board column order: manual `sortOrder` first, descending.
+ *
+ *  Descending keeps the newest card on top without a separate rule, because `createTask`
+ *  assigns an increasing `sortOrder` per project. Ordering by anything else (`updatedAt`,
+ *  for one) silently discards every drag-to-reorder write. */
+export function boardColumnOrder<T extends BoardOrderedTask>(tasks: readonly T[]): T[] {
+  return [...tasks].sort((left, right) => {
+    if (right.sortOrder !== left.sortOrder) return right.sortOrder - left.sortOrder
     if (right.createdAt !== left.createdAt) return right.createdAt - left.createdAt
     return left.id.localeCompare(right.id)
   })
+}
+
+/** One page of a board column in manual order; later clicks reveal another page below. */
+export function paginateBoardColumn<T extends BoardOrderedTask>(
+  tasks: readonly T[],
+  visibleCount = BOARD_COLUMN_PAGE_SIZE,
+): { readonly visible: readonly T[]; readonly remaining: number } {
+  const ordered = boardColumnOrder(tasks)
   const limit = Math.max(0, visibleCount)
   return {
     visible: ordered.slice(0, limit),
     remaining: Math.max(0, ordered.length - limit),
   }
+}
+
+const BOARD_ORDER_STEP = 1000
+
+/** `sortOrder` that lands a card directly above `target`, or at the column end when dropped on
+ *  empty space. Midpoints keep neighbouring cards untouched, so one drop is one write. */
+export function boardDropSortOrder(
+  column: readonly BoardOrderedTask[],
+  draggedId: string,
+  target?: { readonly id: string },
+): number | undefined {
+  const ordered = boardColumnOrder(column).filter(task => task.id !== draggedId)
+  if (target === undefined) {
+    const last = ordered[ordered.length - 1]
+    return last === undefined ? undefined : last.sortOrder - BOARD_ORDER_STEP
+  }
+  const at = ordered.findIndex(task => task.id === target.id)
+  if (at < 0) return undefined
+  const below = ordered[at]!
+  const above = ordered[at - 1]
+  return above === undefined ? below.sortOrder + BOARD_ORDER_STEP : (above.sortOrder + below.sortOrder) / 2
 }
 
 /** Human quick-add from the web form: land in Backlog so drafts are not claimed. */
@@ -52,6 +89,11 @@ export function humanQuickCreateRequest(projectId: string, title: string): {
   readonly status: 'backlog'
 } {
   return { projectId, title: title.trim(), creator: 'human:web-client', status: 'backlog' }
+}
+
+/** Content types the page can render inline; everything else is download-only. */
+export function isPreviewableAttachment(contentType: string): boolean {
+  return /^image\/(gif|jpeg|png|webp)$/i.test(contentType.trim())
 }
 
 /** Empty descriptions open Write; saved Markdown opens Preview. */
@@ -86,29 +128,77 @@ export function classifyRevisionChange(previous: number | undefined, next: numbe
   return next === previous + 1 ? 'next' : 'gap'
 }
 
+export type TaskListSortKey = 'identifier' | 'title' | 'status' | 'priority' | 'dueDate'
+
+const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 }
+const STATUS_RANK = new Map(TASK_STATUSES.map((status, index) => [status as string, index]))
+
+/** Rank one task for the list view. Priority and status are enums with a meaningful order, so
+ *  comparing their raw strings put "high" before "low" before "urgent" -- alphabetical noise. */
+function sortValue(task: TaskListSortable, key: TaskListSortKey): string | number {
+  if (key === 'priority') return PRIORITY_RANK[task.priority] ?? Number.MAX_SAFE_INTEGER
+  if (key === 'status') return STATUS_RANK.get(task.status) ?? Number.MAX_SAFE_INTEGER
+  // Undated tasks sort last in both directions rather than leading the ascending page.
+  if (key === 'dueDate') return task.dueDate ?? '\uffff'
+  return key === 'title' ? task.title : task.identifier
+}
+
+export interface TaskListSortable {
+  readonly identifier: string
+  readonly title: string
+  readonly status: string
+  readonly priority: string
+  readonly dueDate?: string
+}
+
+/** Order the list view by one column, in the requested direction. */
+export function sortTaskList<T extends TaskListSortable>(
+  tasks: readonly T[],
+  key: TaskListSortKey,
+  direction: 'asc' | 'desc' = 'asc',
+): T[] {
+  const sign = direction === 'asc' ? 1 : -1
+  return [...tasks].sort((left, right) => {
+    const a = sortValue(left, key)
+    const b = sortValue(right, key)
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (a !== b) return (a - b) * sign
+    } else if (a !== b) {
+      return String(a).localeCompare(String(b), undefined, { numeric: true }) * sign
+    }
+    // Stable, direction-independent tiebreak so equal rows never shuffle between renders.
+    return left.identifier.localeCompare(right.identifier, undefined, { numeric: true })
+  })
+}
+
 export type BoardDropIntent =
   | { readonly kind: 'none' }
   | { readonly kind: 'reorder'; readonly taskId: string; readonly expectedVersion: number; readonly sortOrder: number }
   | { readonly kind: 'move'; readonly taskId: string; readonly expectedVersion: number; readonly status: TaskStatus; readonly sortOrder?: number }
 
-/** Map a board drop onto reorder-within-column or a human status move. */
+/** Map a board drop onto reorder-within-column or a human status move.
+ *
+ *  `column` is every task already in the destination column, so a drop on empty space can
+ *  append to the end instead of being discarded. */
 export function boardDropIntent(
   dragged: { readonly id: string; readonly status: TaskStatus; readonly version: number; readonly archivedAt?: number } | undefined,
   targetStatus: TaskStatus,
-  target?: { readonly id: string; readonly sortOrder: number },
+  column: readonly BoardOrderedTask[] = [],
+  target?: { readonly id: string },
 ): BoardDropIntent {
   if (dragged === undefined || dragged.archivedAt !== undefined) return { kind: 'none' }
   if (target !== undefined && dragged.id === target.id) return { kind: 'none' }
+  const sortOrder = boardDropSortOrder(column, dragged.id, target)
   if (dragged.status === targetStatus) {
-    if (target === undefined) return { kind: 'none' }
-    return { kind: 'reorder', taskId: dragged.id, expectedVersion: dragged.version, sortOrder: target.sortOrder - 0.5 }
+    if (sortOrder === undefined) return { kind: 'none' }
+    return { kind: 'reorder', taskId: dragged.id, expectedVersion: dragged.version, sortOrder }
   }
   return {
     kind: 'move',
     taskId: dragged.id,
     expectedVersion: dragged.version,
     status: targetStatus,
-    ...(target === undefined ? {} : { sortOrder: target.sortOrder - 0.5 }),
+    ...(sortOrder === undefined ? {} : { sortOrder }),
   }
 }
 
@@ -338,6 +428,12 @@ export class TaskboardClientController {
     anchor.remove()
   }
 
+  /** One-time inline URL for previewing an attachment in place; the ticket expires after one GET. */
+  async previewAttachmentUrl(attachmentId: string): Promise<string> {
+    const ticket = await this.mutate('attachment.download-ticket', { attachmentId, disposition: 'inline' }) as { url: string }
+    return ticket.url
+  }
+
   dispose(): void {
     if (typeof window !== 'undefined') window.removeEventListener('hashchange', this.onRoute)
     this.listeners.clear()
@@ -350,7 +446,9 @@ export class TaskboardClientController {
 
   private navigate(route: TaskboardRoute): void {
     const hash = encodeTaskboardRoute(route)
-    if (typeof history !== 'undefined') history.pushState(null, '', hash)
+    // Re-selecting the same view used to push a duplicate entry, so Back had to be pressed once
+    // per click to leave the page.
+    if (typeof history !== 'undefined' && hash !== location.hash) history.pushState(null, '', hash)
     this.route = route
     this.publish()
   }
