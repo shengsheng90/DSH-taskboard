@@ -541,6 +541,10 @@ export class TaskboardService extends TypertRemoteService {
         this.validateAutomation(config)
         return this.provider.createAutomation(ProjectId(string(input['projectId'], 'projectId')), config, actor)
       }
+      case 'storage.check-integrity':
+        // The full-page scan is explicit: it must never ride along on the snapshot path.
+        this.provider.refreshIntegrity()
+        return this.provider.storageHealth()
       case 'automation.update': {
         const update = record(input['update'], 'update') as { config?: AutomationRuleConfig; state?: AutomationState }
         if (update.config !== undefined) this.validateAutomation(update.config)

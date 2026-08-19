@@ -22,6 +22,16 @@ test('migrates the previous schema monotonically and adds claim automation owner
       claimed_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     ) STRICT;
+    CREATE TABLE comments (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      session_id TEXT,
+      version INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
     PRAGMA user_version = 2;
   `)
   old.close()
@@ -31,6 +41,12 @@ test('migrates the previous schema monotonically and adds claim automation owner
     const columns = migrated.prepare('PRAGMA table_info(task_claims)').all() as Array<{ name: string }>
     assert.equal(version.user_version, TASKBOARD_SCHEMA_VERSION)
     assert.ok(columns.some(column => column.name === 'automation_id'))
+    // v4 adds lookup indexes, and skips any whose table is absent from a partial database.
+    const indexes = new Set((migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[])
+      .map(row => row.name))
+    assert.ok(indexes.has('claims_state_time'))
+    assert.ok(indexes.has('comments_task_time'))
+    assert.ok(!indexes.has('attachments_task_time'))
   } finally {
     migrated.close()
     rmSync(directory, { recursive: true, force: true })

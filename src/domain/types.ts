@@ -231,6 +231,8 @@ export interface TaskboardSessionRuntime {
 export interface TaskboardStorageHealth {
   readonly status: 'ok' | 'degraded'
   readonly integrity: string
+  /** Epoch millis of the last full integrity scan; the scan never runs on the snapshot path. */
+  readonly integrityCheckedAt: number
   readonly schemaVersion: number
   readonly globalRevision: number
   readonly projectCount: number

@@ -3,7 +3,28 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { TaskboardError } from '../domain/error.js'
 
-export const TASKBOARD_SCHEMA_VERSION = 3
+export const TASKBOARD_SCHEMA_VERSION = 4
+
+/** Per-parent lookup indexes. Without these, task detail alone drives three full table scans. */
+const LOOKUP_INDEXES: readonly { readonly table: string; readonly sql: string }[] = [
+  { table: 'comments', sql: 'CREATE INDEX IF NOT EXISTS comments_task_time ON comments(task_id, created_at)' },
+  { table: 'attachments', sql: 'CREATE INDEX IF NOT EXISTS attachments_task_time ON attachments(task_id, created_at)' },
+  { table: 'attachments', sql: 'CREATE INDEX IF NOT EXISTS attachments_comment ON attachments(comment_id)' },
+  { table: 'task_relations', sql: 'CREATE INDEX IF NOT EXISTS relations_source_time ON task_relations(source_task_id, created_at)' },
+  { table: 'task_relations', sql: 'CREATE INDEX IF NOT EXISTS relations_target_time ON task_relations(target_task_id, created_at)' },
+  { table: 'task_claims', sql: 'CREATE INDEX IF NOT EXISTS claims_state_time ON task_claims(state, claimed_at)' },
+  { table: 'automation_runs', sql: 'CREATE INDEX IF NOT EXISTS automation_runs_rule_time ON automation_runs(rule_id, created_at)' },
+  { table: 'tasks', sql: 'CREATE INDEX IF NOT EXISTS tasks_workflow ON tasks(workflow_id) WHERE workflow_id IS NOT NULL' },
+]
+
+const ALL_LOOKUP_INDEX_DDL = LOOKUP_INDEXES.map(index => `${index.sql};`).join('\n')
+
+/** Skip indexes whose table is absent so one partially-created database cannot block the upgrade. */
+function lookupIndexDdl(db: DatabaseSync): string {
+  const present = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+    .map(row => row.name))
+  return LOOKUP_INDEXES.filter(index => present.has(index.table)).map(index => `${index.sql};`).join('\n')
+}
 
 /** Open and initialize the authoritative Taskboard database. */
 export function openTaskboardDatabase(path: string): DatabaseSync {
@@ -23,7 +44,17 @@ export function openTaskboardDatabase(path: string): DatabaseSync {
   if (row.user_version === 0) initialize(db)
   else if (row.user_version === 1) migrateV1ToV2(db)
   if (row.user_version === 1 || row.user_version === 2) migrateV2ToV3(db)
+  if (row.user_version >= 1 && row.user_version <= 3) migrateV3ToV4(db)
   return db
+}
+
+function migrateV3ToV4(db: DatabaseSync): void {
+  db.exec(`
+    BEGIN IMMEDIATE;
+    ${lookupIndexDdl(db)}
+    PRAGMA user_version = 4;
+    COMMIT;
+  `)
 }
 
 function migrateV1ToV2(db: DatabaseSync): void {
@@ -193,6 +224,7 @@ function initialize(db: DatabaseSync): void {
       decision_json TEXT NOT NULL,
       created_at INTEGER NOT NULL
     ) STRICT;
+    ${ALL_LOOKUP_INDEX_DDL}
     PRAGMA user_version = ${TASKBOARD_SCHEMA_VERSION};
     COMMIT;
   `)

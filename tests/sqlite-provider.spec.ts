@@ -361,11 +361,17 @@ test('validates and round-trips recurrence while exposing bounded storage health
       recurrence: { frequency: 'weekly', interval: 2, until: '2026-12-31' },
     }, human)
     assert.deepEqual(provider.getTask(task.id).recurrence, { frequency: 'weekly', interval: 2, until: '2026-12-31' })
-    assert.deepEqual(provider.storageHealth(), {
-      status: 'ok', integrity: 'ok', schemaVersion: 3, globalRevision: 2,
+    const { integrityCheckedAt, ...health } = provider.storageHealth()
+    assert.deepEqual(health, {
+      status: 'ok', integrity: 'ok', schemaVersion: 4, globalRevision: 2,
       projectCount: 1, taskCount: 1, attachmentCount: 0, attachmentBytes: 0,
       cleanupPending: 0, orphanedClaims: 0,
     })
+    // The scan runs once when the database opens; storageHealth() must never re-run it.
+    assert.ok(integrityCheckedAt > 0)
+    assert.equal(provider.storageHealth().integrityCheckedAt, integrityCheckedAt)
+    assert.equal(provider.refreshIntegrity(), 'ok')
+    assert.ok(provider.storageHealth().integrityCheckedAt >= integrityCheckedAt)
     assert.throws(() => provider.updateTask(task.id, task.version, {
       recurrence: { frequency: 'weekly', interval: 0 },
     }, human), expectCode('TASK_INVALID_INPUT'))
