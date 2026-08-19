@@ -410,7 +410,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           <button key={view} type="button" aria-current={route.view === view ? 'page' : undefined} onClick={() => { controller.select(selected?.id, view) }}>{t[view]}</button>
         ))}
       </nav>
-      {error !== undefined && <div className="dsh-taskboard-error" role="alert">{error}</div>}
+      {error !== undefined && <div className="dsh-taskboard-error" role="alert"><span>{error}</span><button type="button" aria-label={t.dismiss} onClick={() => { setError(undefined) }}><CloseIcon size={12} /></button></div>}
+      {snapshot?.tasksTruncated === true && <div className="dsh-taskboard-notice" role="status">{interpolate(t.tasksTruncated, { shown: snapshot.tasks.length, total: snapshot.taskTotal })}</div>}
       {busy && snapshot === undefined
         ? <div className="dsh-taskboard-loading">{t.loading}</div>
         : <div className="dsh-taskboard-content">
@@ -728,7 +729,8 @@ function Board({ tasks, open, mutate }: {
   const draggingRef = useRef(false)
   const dragged = tasks.find(task => task.id === draggedId)
   const applyDrop = (status: typeof TASK_STATUSES[number], target?: TaskboardTask): void => {
-    const intent = boardDropIntent(dragged, status, target)
+    const column = tasks.filter(task => task.status === status && task.archivedAt === undefined)
+    const intent = boardDropIntent(dragged, status, column, target)
     setDraggedId(undefined)
     if (intent.kind === 'reorder') {
       void mutate('task.update', {
@@ -1400,7 +1402,7 @@ ${NAV_STYLES}
 .dsh-taskboard-header select,.dsh-taskboard-filters select,.dsh-taskboard-gantt>header select{height:36px;border-radius:18px}
 .dsh-taskboard-filters{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-filters input{flex:1;min-width:120px}
 .dsh-taskboard-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-tabs button{height:40px;padding:9px 16px 9px 12px;border:0;border-radius:12px;background:transparent}.dsh-taskboard-tabs button:hover{background:var(--dsw-specific-sidebar-nav-item-hover,#f1f3f5)}.dsh-taskboard-tabs button[aria-current=page]{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}
-.dsh-taskboard-error{padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-error{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-error button{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:transparent;color:inherit;cursor:pointer}.dsh-taskboard-error button:hover{background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.12))}.dsh-taskboard-notice{padding:8px 16px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-content{display:flex;flex:1;min-height:0}.dsh-taskboard-view{flex:1;min-width:0;overflow:auto;padding:16px 24px 24px}
 .dsh-taskboard-create{display:flex;gap:8px;margin-bottom:16px}.dsh-taskboard-create input{flex:1}
 .dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-dashboard strong{font-size:30px;line-height:38px;font-weight:500}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#61666b)}

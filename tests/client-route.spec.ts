@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -65,14 +65,55 @@ test('new Session draft carries the exact task identity, current facts, and huma
 
 test('board drops move status across columns and reorder inside one column', () => {
   const dragged = { id: 't1', status: 'todo' as const, version: 4 }
-  assert.deepEqual(boardDropIntent(dragged, 'in_progress'), {
+  // Column is ordered by descending sortOrder, so t3 renders above t2 above t1.
+  const todo = [
+    { id: 't3', sortOrder: 3000, createdAt: 3 },
+    { id: 't2', sortOrder: 2000, createdAt: 2 },
+    { id: 't1', sortOrder: 1000, createdAt: 1 },
+  ]
+
+  // Dropping on empty space in another column appends to that column's end.
+  assert.deepEqual(boardDropIntent(dragged, 'in_progress', []), {
     kind: 'move', taskId: 't1', expectedVersion: 4, status: 'in_progress',
   })
-  assert.deepEqual(boardDropIntent(dragged, 'todo', { id: 't2', sortOrder: 10 }), {
-    kind: 'reorder', taskId: 't1', expectedVersion: 4, sortOrder: 9.5,
+  assert.deepEqual(boardDropIntent(dragged, 'in_progress', [{ id: 'p1', sortOrder: 500, createdAt: 9 }]), {
+    kind: 'move', taskId: 't1', expectedVersion: 4, status: 'in_progress', sortOrder: -500,
   })
-  assert.equal(boardDropIntent(dragged, 'todo', { id: 't1', sortOrder: 10 }).kind, 'none')
-  assert.equal(boardDropIntent({ ...dragged, archivedAt: 1 }, 'in_review').kind, 'none')
+
+  // Dropping on a card lands directly above it, midway between it and the card above.
+  assert.deepEqual(boardDropIntent(dragged, 'todo', todo, { id: 't2' }), {
+    kind: 'reorder', taskId: 't1', expectedVersion: 4, sortOrder: 2500,
+  })
+  // Dropping on the topmost card moves above every sibling.
+  assert.deepEqual(boardDropIntent(dragged, 'todo', todo, { id: 't3' }), {
+    kind: 'reorder', taskId: 't1', expectedVersion: 4, sortOrder: 4000,
+  })
+  // Dropping on empty space in the card's own column moves it to the end (regression: was a no-op).
+  assert.deepEqual(boardDropIntent(dragged, 'todo', todo), {
+    kind: 'reorder', taskId: 't1', expectedVersion: 4, sortOrder: 1000,
+  })
+
+  assert.equal(boardDropIntent(dragged, 'todo', todo, { id: 't1' }).kind, 'none')
+  assert.equal(boardDropIntent({ ...dragged, archivedAt: 1 }, 'in_review', []).kind, 'none')
+  assert.equal(boardDropIntent(undefined, 'todo', todo, { id: 't2' }).kind, 'none')
+  // An unknown target cannot be positioned; the drop is refused rather than guessed.
+  assert.equal(boardDropIntent(dragged, 'todo', todo, { id: 'missing' }).kind, 'none')
+})
+
+test('a reordered card keeps its dropped position instead of jumping to the top of the column', () => {
+  // Regression: the column was ordered by updatedAt, so writing sortOrder bumped updated_at and
+  // sent the card straight to the top no matter where it was dropped.
+  const column = [
+    { id: 'a', sortOrder: 3000, createdAt: 1 },
+    { id: 'b', sortOrder: 2000, createdAt: 2 },
+    { id: 'c', sortOrder: 1000, createdAt: 3 },
+  ]
+  assert.deepEqual(boardColumnOrder(column).map(task => task.id), ['a', 'b', 'c'])
+
+  const intent = boardDropIntent({ id: 'c', status: 'todo', version: 1 }, 'todo', column, { id: 'b' })
+  assert.equal(intent.kind, 'reorder')
+  const moved = column.map(task => task.id === 'c' && intent.kind === 'reorder' ? { ...task, sortOrder: intent.sortOrder } : task)
+  assert.deepEqual(boardColumnOrder(moved).map(task => task.id), ['a', 'c', 'b'])
 })
 
 test('snapshot revisions distinguish contiguous updates, missed-event gaps, and Host resets', () => {
@@ -200,25 +241,30 @@ test('human quick-add creates a Backlog task and only treats a mutation result w
   assert.equal(createdTaskId(undefined), undefined)
 })
 
-test('board columns show the newest page of tasks and reveal older cards on later pages', () => {
+test('board columns page through manual order, newest first by default', () => {
+  // createTask assigns an increasing sortOrder per project, so descending order still puts the
+  // newest card on top -- without discarding manual drag-to-reorder writes.
   const tasks = Array.from({ length: 18 }, (_, index) => ({
     id: `task-${String(index).padStart(2, '0')}`,
     createdAt: index,
-    updatedAt: index === 0 ? 100 : index,
+    sortOrder: (index + 1) * 1000,
   }))
   const first = paginateBoardColumn(tasks)
   assert.equal(BOARD_COLUMN_PAGE_SIZE, 15)
   assert.equal(first.visible.length, 15)
   assert.equal(first.remaining, 3)
   assert.deepEqual(first.visible.map(task => task.id), [
-    'task-00', 'task-17', 'task-16', 'task-15', 'task-14', 'task-13', 'task-12', 'task-11',
-    'task-10', 'task-09', 'task-08', 'task-07', 'task-06', 'task-05', 'task-04',
+    'task-17', 'task-16', 'task-15', 'task-14', 'task-13', 'task-12', 'task-11', 'task-10',
+    'task-09', 'task-08', 'task-07', 'task-06', 'task-05', 'task-04', 'task-03',
   ])
   const second = paginateBoardColumn(tasks, BOARD_COLUMN_PAGE_SIZE * 2)
   assert.equal(second.visible.length, 18)
   assert.equal(second.remaining, 0)
-  assert.deepEqual(second.visible.slice(15).map(task => task.id), ['task-03', 'task-02', 'task-01'])
-  assert.deepEqual(paginateBoardColumn(tasks.slice(0, 3)).visible.map(task => task.id), ['task-00', 'task-02', 'task-01'])
+  assert.deepEqual(second.visible.slice(15).map(task => task.id), ['task-02', 'task-01', 'task-00'])
+
+  // A manual reorder wins over creation order.
+  const reordered = tasks.map(task => task.id === 'task-00' ? { ...task, sortOrder: 99_000 } : task)
+  assert.equal(paginateBoardColumn(reordered).visible[0]?.id, 'task-00')
   assert.equal(paginateBoardColumn(tasks.slice(0, 3)).remaining, 0)
 })
 

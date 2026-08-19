@@ -24,6 +24,7 @@ export interface Config {
   readonly databasePath: string
   readonly attachmentRoot: string
   readonly pageSize?: number
+  readonly snapshotTaskLimit?: number
   readonly maxAttachmentBytes?: number
   readonly maxTaskAttachmentBytes?: number
   readonly allowedAttachmentTypes?: string[]
@@ -41,7 +42,8 @@ export interface Config {
 export const Config: z<Config> = z.object({
   databasePath: z.string().required(),
   attachmentRoot: z.string().required(),
-  pageSize: z.natural().min(1).max(500).default(100),
+  pageSize: z.natural().min(1).max(2_000).default(100),
+  snapshotTaskLimit: z.natural().min(1).max(2_000).default(1_000),
   maxAttachmentBytes: z.natural().min(1).default(25 * 1024 * 1024),
   maxTaskAttachmentBytes: z.natural().min(1).default(100 * 1024 * 1024),
   allowedAttachmentTypes: z.array(z.string()).default([

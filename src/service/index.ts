@@ -30,6 +30,7 @@ export interface ResolvedTaskboardConfig {
   readonly databasePath: string
   readonly attachmentRoot: string
   readonly pageSize: number
+  readonly snapshotTaskLimit: number
   readonly maxAttachmentBytes: number
   readonly maxTaskAttachmentBytes: number
   readonly allowedAttachmentTypes: readonly string[]
@@ -54,6 +55,9 @@ export interface TaskboardSnapshot {
   readonly globalRevision: number
   readonly projects: readonly TaskboardProject[]
   readonly tasks: readonly TaskboardTask[]
+  /** Tasks matching the project in storage; greater than `tasks.length` when the page was cut. */
+  readonly taskTotal: number
+  readonly tasksTruncated: boolean
   readonly workflows: readonly SavedWorkflow[]
   readonly automations: readonly AutomationRule[]
   readonly automationRuns: readonly AutomationRun[]
@@ -163,6 +167,7 @@ function resolved(config: Config): ResolvedTaskboardConfig {
     databasePath,
     attachmentRoot,
     pageSize: config.pageSize ?? 100,
+    snapshotTaskLimit: config.snapshotTaskLimit ?? 1_000,
     maxAttachmentBytes,
     maxTaskAttachmentBytes,
     allowedAttachmentTypes: config.allowedAttachmentTypes ?? [
@@ -303,12 +308,22 @@ export class TaskboardService extends TypertRemoteService {
 
   snapshot(projectId?: TaskboardProjectId): TaskboardSnapshot {
     const projects = this.provider.listProjects()
-    const selected = projectId ?? projects[0]?.id
+    // A projectId that no longer exists (deleted elsewhere, or a stale deep link) must not fail
+    // the whole snapshot -- fall back to the first project so the page stays usable.
+    const requested = projectId !== undefined && projects.some(project => project.id === projectId) ? projectId : undefined
+    const selected = requested ?? projects[0]?.id
+    const filter = { includeArchived: true } as const
+    const tasks = selected === undefined
+      ? []
+      : this.provider.listTasks({ projectId: selected, ...filter, limit: this.config.snapshotTaskLimit })
+    const taskTotal = selected === undefined ? 0 : this.provider.countTasks({ projectId: selected, ...filter })
     return {
       schemaVersion: 1,
       globalRevision: this.provider.globalRevision(),
       projects,
-      tasks: selected === undefined ? [] : this.provider.listTasks({ projectId: selected, includeArchived: true, limit: this.config.pageSize }),
+      tasks,
+      taskTotal,
+      tasksTruncated: taskTotal > tasks.length,
       workflows: selected === undefined ? [] : this.provider.listWorkflows(selected),
       automations: selected === undefined ? [] : this.provider.listAutomations(selected),
       automationRuns: selected === undefined ? [] : this.provider.listAutomationRuns(selected),

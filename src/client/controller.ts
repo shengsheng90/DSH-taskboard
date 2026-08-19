@@ -27,21 +27,57 @@ export function previewAutomationRuns<T>(runs: readonly T[], limit = AUTOMATION_
   return { preview: runs.slice(0, limit), remaining: Math.max(0, runs.length - limit) }
 }
 
-/** Newest-first page of one board column; later clicks reveal another page of older cards. */
-export function paginateBoardColumn<T extends { readonly updatedAt: number; readonly createdAt: number; readonly id: string }>(
-  tasks: readonly T[],
-  visibleCount = BOARD_COLUMN_PAGE_SIZE,
-): { readonly visible: readonly T[]; readonly remaining: number } {
-  const ordered = [...tasks].sort((left, right) => {
-    if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt
+export interface BoardOrderedTask {
+  readonly sortOrder: number
+  readonly createdAt: number
+  readonly id: string
+}
+
+/** Authoritative board column order: manual `sortOrder` first, descending.
+ *
+ *  Descending keeps the newest card on top without a separate rule, because `createTask`
+ *  assigns an increasing `sortOrder` per project. Ordering by anything else (`updatedAt`,
+ *  for one) silently discards every drag-to-reorder write. */
+export function boardColumnOrder<T extends BoardOrderedTask>(tasks: readonly T[]): T[] {
+  return [...tasks].sort((left, right) => {
+    if (right.sortOrder !== left.sortOrder) return right.sortOrder - left.sortOrder
     if (right.createdAt !== left.createdAt) return right.createdAt - left.createdAt
     return left.id.localeCompare(right.id)
   })
+}
+
+/** One page of a board column in manual order; later clicks reveal another page below. */
+export function paginateBoardColumn<T extends BoardOrderedTask>(
+  tasks: readonly T[],
+  visibleCount = BOARD_COLUMN_PAGE_SIZE,
+): { readonly visible: readonly T[]; readonly remaining: number } {
+  const ordered = boardColumnOrder(tasks)
   const limit = Math.max(0, visibleCount)
   return {
     visible: ordered.slice(0, limit),
     remaining: Math.max(0, ordered.length - limit),
   }
+}
+
+const BOARD_ORDER_STEP = 1000
+
+/** `sortOrder` that lands a card directly above `target`, or at the column end when dropped on
+ *  empty space. Midpoints keep neighbouring cards untouched, so one drop is one write. */
+export function boardDropSortOrder(
+  column: readonly BoardOrderedTask[],
+  draggedId: string,
+  target?: { readonly id: string },
+): number | undefined {
+  const ordered = boardColumnOrder(column).filter(task => task.id !== draggedId)
+  if (target === undefined) {
+    const last = ordered[ordered.length - 1]
+    return last === undefined ? undefined : last.sortOrder - BOARD_ORDER_STEP
+  }
+  const at = ordered.findIndex(task => task.id === target.id)
+  if (at < 0) return undefined
+  const below = ordered[at]!
+  const above = ordered[at - 1]
+  return above === undefined ? below.sortOrder + BOARD_ORDER_STEP : (above.sortOrder + below.sortOrder) / 2
 }
 
 /** Human quick-add from the web form: land in Backlog so drafts are not claimed. */
@@ -91,24 +127,29 @@ export type BoardDropIntent =
   | { readonly kind: 'reorder'; readonly taskId: string; readonly expectedVersion: number; readonly sortOrder: number }
   | { readonly kind: 'move'; readonly taskId: string; readonly expectedVersion: number; readonly status: TaskStatus; readonly sortOrder?: number }
 
-/** Map a board drop onto reorder-within-column or a human status move. */
+/** Map a board drop onto reorder-within-column or a human status move.
+ *
+ *  `column` is every task already in the destination column, so a drop on empty space can
+ *  append to the end instead of being discarded. */
 export function boardDropIntent(
   dragged: { readonly id: string; readonly status: TaskStatus; readonly version: number; readonly archivedAt?: number } | undefined,
   targetStatus: TaskStatus,
-  target?: { readonly id: string; readonly sortOrder: number },
+  column: readonly BoardOrderedTask[] = [],
+  target?: { readonly id: string },
 ): BoardDropIntent {
   if (dragged === undefined || dragged.archivedAt !== undefined) return { kind: 'none' }
   if (target !== undefined && dragged.id === target.id) return { kind: 'none' }
+  const sortOrder = boardDropSortOrder(column, dragged.id, target)
   if (dragged.status === targetStatus) {
-    if (target === undefined) return { kind: 'none' }
-    return { kind: 'reorder', taskId: dragged.id, expectedVersion: dragged.version, sortOrder: target.sortOrder - 0.5 }
+    if (sortOrder === undefined) return { kind: 'none' }
+    return { kind: 'reorder', taskId: dragged.id, expectedVersion: dragged.version, sortOrder }
   }
   return {
     kind: 'move',
     taskId: dragged.id,
     expectedVersion: dragged.version,
     status: targetStatus,
-    ...(target === undefined ? {} : { sortOrder: target.sortOrder - 0.5 }),
+    ...(sortOrder === undefined ? {} : { sortOrder }),
   }
 }
 

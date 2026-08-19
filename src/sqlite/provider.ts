@@ -262,6 +262,8 @@ function mapAutomationRun(row: Row): AutomationRun {
 
 const AUTOMATION_RUN_KEEP = 80
 const STATEMENT_CACHE_LIMIT = 256
+/** Hard ceiling for one task page; callers ask for less and learn the total from countTasks. */
+export const TASK_PAGE_LIMIT = 2_000
 
 /** Local transactional Taskboard authority backed by one SQLite database. */
 export class SqliteTaskboardProvider {
@@ -442,10 +444,10 @@ export class SqliteTaskboardProvider {
     }
   }
 
-  listTasks(filter: TaskListFilter): TaskboardTask[] {
+  private taskFilterSql(filter: TaskListFilter): { readonly where: string; readonly values: SqlValue[] } {
     this.getProject(filter.projectId)
     const clauses = ['project_id = ?']
-    const values: Array<string | number> = [filter.projectId]
+    const values: SqlValue[] = [filter.projectId]
     if (filter.includeArchived !== true) clauses.push('archived_at IS NULL')
     if (filter.statuses !== undefined && filter.statuses.length > 0) {
       clauses.push(`status IN (${filter.statuses.map(() => '?').join(',')})`)
@@ -456,15 +458,26 @@ export class SqliteTaskboardProvider {
       const escaped = filter.search.trim().replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')
       values.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`)
     }
-    const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500)
+    return { where: clauses.join(' AND '), values }
+  }
+
+  /** Total tasks matching a filter, so a bounded page can report what it left out. */
+  countTasks(filter: TaskListFilter): number {
+    const { where, values } = this.taskFilterSql(filter)
+    const row = this.sql(`SELECT COUNT(*) AS count FROM tasks WHERE ${where}`).get(...values) as Row
+    return Number(row['count'])
+  }
+
+  listTasks(filter: TaskListFilter): TaskboardTask[] {
+    const { where, values } = this.taskFilterSql(filter)
+    const limit = Math.min(Math.max(filter.limit ?? 100, 1), TASK_PAGE_LIMIT)
     const offset = Math.max(filter.offset ?? 0, 0)
-    values.push(limit, offset)
     const statement = this.sql(`
-      SELECT * FROM tasks WHERE ${clauses.join(' AND ')}
+      SELECT * FROM tasks WHERE ${where}
       ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
       sort_order, created_at, id LIMIT ? OFFSET ?
     `)
-    return (statement.all(...values) as Row[]).map(mapTask)
+    return (statement.all(...values, limit, offset) as Row[]).map(mapTask)
   }
 
   updateTask(taskId: TaskboardTaskId, expectedVersion: number, request: UpdateTaskRequest, actor: TaskboardActor): TaskboardTask {
