@@ -324,7 +324,8 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 |---|---|---|
 | `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE` |
 | `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS` |
-| `pageSize` | `100` | 有界列表页大小 |
+| `pageSize` | `100` | `taskboard_list` 单页大小，结果会带上匹配总数 |
+| `snapshotTaskLimit` | `1000` | 单次网页快照的任务数上限，被截断时页面会给出提示 |
 | `maxAttachmentBytes` | `26214400` | 单文件 25 MiB |
 | `maxTaskAttachmentBytes` | `104857600` | 单任务 100 MiB |
 | `minAutomationIntervalMs` | `30000` | 自动化间隔下限 |

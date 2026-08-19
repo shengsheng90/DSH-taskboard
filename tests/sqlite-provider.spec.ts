@@ -365,7 +365,7 @@ test('validates and round-trips recurrence while exposing bounded storage health
     assert.deepEqual(health, {
       status: 'ok', integrity: 'ok', schemaVersion: 4, globalRevision: 2,
       projectCount: 1, taskCount: 1, attachmentCount: 0, attachmentBytes: 0,
-      cleanupPending: 0, orphanedClaims: 0,
+      cleanupPending: 0, cleanupStalled: 0, orphanedClaims: 0,
     })
     // The scan runs once when the database opens; storageHealth() must never re-run it.
     assert.ok(integrityCheckedAt > 0)

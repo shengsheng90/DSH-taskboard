@@ -91,6 +91,11 @@ export function humanQuickCreateRequest(projectId: string, title: string): {
   return { projectId, title: title.trim(), creator: 'human:web-client', status: 'backlog' }
 }
 
+/** Content types the page can render inline; everything else is download-only. */
+export function isPreviewableAttachment(contentType: string): boolean {
+  return /^image\/(gif|jpeg|png|webp)$/i.test(contentType.trim())
+}
+
 /** Empty descriptions open Write; saved Markdown opens Preview. */
 export function descriptionComposerMode(description: string): 'write' | 'preview' {
   return description.trim() === '' ? 'write' : 'preview'
@@ -423,6 +428,12 @@ export class TaskboardClientController {
     anchor.remove()
   }
 
+  /** One-time inline URL for previewing an attachment in place; the ticket expires after one GET. */
+  async previewAttachmentUrl(attachmentId: string): Promise<string> {
+    const ticket = await this.mutate('attachment.download-ticket', { attachmentId, disposition: 'inline' }) as { url: string }
+    return ticket.url
+  }
+
   dispose(): void {
     if (typeof window !== 'undefined') window.removeEventListener('hashchange', this.onRoute)
     this.listeners.clear()
@@ -435,7 +446,9 @@ export class TaskboardClientController {
 
   private navigate(route: TaskboardRoute): void {
     const hash = encodeTaskboardRoute(route)
-    if (typeof history !== 'undefined') history.pushState(null, '', hash)
+    // Re-selecting the same view used to push a duplicate entry, so Back had to be pressed once
+    // per click to leave the page.
+    if (typeof history !== 'undefined' && hash !== location.hash) history.pushState(null, '', hash)
     this.route = route
     this.publish()
   }

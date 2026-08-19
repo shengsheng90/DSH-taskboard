@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
-  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync,
+  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
@@ -260,12 +260,29 @@ function mapAutomationRun(row: Row): AutomationRun {
   }
 }
 
+/** Response headers shared by the buffered and streamed download paths. */
+function attachmentHeaders(
+  attachment: TaskboardAttachment,
+  disposition: 'attachment' | 'inline',
+): Readonly<Record<string, string>> {
+  const effective = disposition === 'inline' && INLINE_CONTENT_TYPES.has(attachment.contentType) ? 'inline' : 'attachment'
+  return {
+    'content-type': attachment.contentType,
+    'content-length': String(attachment.byteSize),
+    'content-disposition': `${effective}; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "default-src 'none'; sandbox",
+  }
+}
+
 const AUTOMATION_RUN_KEEP = 80
 const STATEMENT_CACHE_LIMIT = 256
 /** Hard ceiling for one task page; callers ask for less and learn the total from countTasks. */
 export const TASK_PAGE_LIMIT = 2_000
 /** Newest activity rows returned by default; the log itself is unbounded per task. */
 export const DEFAULT_ACTIVITY_LIMIT = 50
+/** Give up retrying one undeletable attachment file after this many attempts. */
+export const ATTACHMENT_CLEANUP_MAX_ATTEMPTS = 10
 
 /** Local transactional Taskboard authority backed by one SQLite database. */
 export class SqliteTaskboardProvider {
@@ -880,24 +897,37 @@ export class SqliteTaskboardProvider {
     const row = this.sql('SELECT * FROM attachments WHERE id = ?').get(attachmentId) as Row | undefined
     if (row === undefined) throw new TaskboardError(`attachment ${attachmentId} was not found`, 'ATTACHMENT_NOT_FOUND')
     const attachment = mapAttachment(row)
-    const effectiveDisposition = disposition === 'inline' && INLINE_CONTENT_TYPES.has(attachment.contentType) ? 'inline' : 'attachment'
     try {
       const bytes = readFileSync(this.storagePath(String(row['storage_key'])))
       if (bytes.byteLength !== attachment.byteSize) throw new Error('stored byte length does not match authority row')
-      return {
-        attachment,
-        bytes,
-        headers: {
-          'content-type': attachment.contentType,
-          'content-length': String(attachment.byteSize),
-          'content-disposition': `${effectiveDisposition}; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
-          'x-content-type-options': 'nosniff',
-          'content-security-policy': "default-src 'none'; sandbox",
-        },
-      }
+      return { attachment, bytes, headers: attachmentHeaders(attachment, disposition) }
     } catch (cause) {
       throw new TaskboardError('attachment bytes are unavailable', 'ATTACHMENT_STORAGE_FAILURE', { cause: String(cause) })
     }
+  }
+
+  /** Host-internal resolution for streaming a download without loading the file into memory.
+   *  The path never crosses the Client boundary; only the route handler consumes it. */
+  openAttachment(
+    attachmentId: string,
+    disposition: 'attachment' | 'inline' = 'attachment',
+  ): { readonly attachment: TaskboardAttachment; readonly path: string; readonly headers: Readonly<Record<string, string>> } {
+    const row = this.sql('SELECT * FROM attachments WHERE id = ?').get(attachmentId) as Row | undefined
+    if (row === undefined) throw new TaskboardError(`attachment ${attachmentId} was not found`, 'ATTACHMENT_NOT_FOUND')
+    const attachment = mapAttachment(row)
+    const path = this.storagePath(String(row['storage_key']))
+    let size: number
+    try {
+      size = statSync(path).size
+    } catch (cause) {
+      throw new TaskboardError('attachment bytes are unavailable', 'ATTACHMENT_STORAGE_FAILURE', { cause: String(cause) })
+    }
+    if (size !== attachment.byteSize) {
+      throw new TaskboardError('attachment bytes are unavailable', 'ATTACHMENT_STORAGE_FAILURE', {
+        cause: 'stored byte length does not match authority row',
+      })
+    }
+    return { attachment, path, headers: attachmentHeaders(attachment, disposition) }
   }
 
   deleteAttachment(
@@ -1590,14 +1620,17 @@ export class SqliteTaskboardProvider {
     this.sql(`
       INSERT INTO attachment_cleanup(storage_key, reason, attempts, created_at, updated_at)
       VALUES (?, ?, 0, ?, ?)
-      ON CONFLICT(storage_key) DO UPDATE SET reason = excluded.reason, updated_at = excluded.updated_at
+      ON CONFLICT(storage_key) DO UPDATE SET reason = excluded.reason, attempts = 0, updated_at = excluded.updated_at
     `).run(storageKey, reason, timestamp, timestamp)
   }
 
-  /** Retry bounded, durable deletion work left by row publication or authoritative deletion. */
-  retryAttachmentCleanup(limit = 100): { readonly removed: number; readonly pending: number } {
+  /** Retry bounded, durable deletion work left by row publication or authoritative deletion.
+   *  Entries that keep failing stop being retried past ATTACHMENT_CLEANUP_MAX_ATTEMPTS; they stay
+   *  in the table for inspection but no longer hold storage health at 'degraded' forever. */
+  retryAttachmentCleanup(limit = 100): { readonly removed: number; readonly pending: number; readonly stalled: number } {
     const bounded = Math.min(Math.max(Math.trunc(limit), 1), 1_000)
-    const rows = this.sql('SELECT storage_key FROM attachment_cleanup ORDER BY created_at, storage_key LIMIT ?').all(bounded) as Row[]
+    const rows = this.sql('SELECT storage_key FROM attachment_cleanup WHERE attempts < ? ORDER BY created_at, storage_key LIMIT ?')
+      .all(ATTACHMENT_CLEANUP_MAX_ATTEMPTS, bounded) as Row[]
     let removed = 0
     for (const row of rows) {
       const storageKey = String(row['storage_key'])
@@ -1611,8 +1644,12 @@ export class SqliteTaskboardProvider {
           .run(now(), storageKey)
       }
     }
-    const pending = this.sql('SELECT COUNT(*) AS count FROM attachment_cleanup').get() as Row
-    return { removed, pending: Number(pending['count']) }
+    const counts = this.sql(`
+      SELECT
+        (SELECT COUNT(*) FROM attachment_cleanup WHERE attempts < ?) AS pending,
+        (SELECT COUNT(*) FROM attachment_cleanup WHERE attempts >= ?) AS stalled
+    `).get(ATTACHMENT_CLEANUP_MAX_ATTEMPTS, ATTACHMENT_CLEANUP_MAX_ATTEMPTS) as Row
+    return { removed, pending: Number(counts['pending']), stalled: Number(counts['stalled']) }
   }
 
   /** Run the full-database integrity scan. It reads every page, so it never runs on the snapshot path. */
@@ -1632,12 +1669,14 @@ export class SqliteTaskboardProvider {
         (SELECT COUNT(*) FROM tasks) AS task_count,
         (SELECT COUNT(*) FROM attachments) AS attachment_count,
         (SELECT COALESCE(SUM(byte_size), 0) FROM attachments) AS attachment_bytes,
-        (SELECT COUNT(*) FROM attachment_cleanup) AS cleanup_pending,
+        (SELECT COUNT(*) FROM attachment_cleanup WHERE attempts < ${ATTACHMENT_CLEANUP_MAX_ATTEMPTS}) AS cleanup_pending,
+        (SELECT COUNT(*) FROM attachment_cleanup WHERE attempts >= ${ATTACHMENT_CLEANUP_MAX_ATTEMPTS}) AS cleanup_stalled,
         (SELECT COUNT(*) FROM task_claims WHERE state = 'orphaned') AS orphaned_claims
     `).get() as Row
     const cleanupPending = Number(counts['cleanup_pending'])
+    const cleanupStalled = Number(counts['cleanup_stalled'])
     return {
-      status: integrity === 'ok' && cleanupPending === 0 ? 'ok' : 'degraded',
+      status: integrity === 'ok' && cleanupPending === 0 && cleanupStalled === 0 ? 'ok' : 'degraded',
       integrity,
       integrityCheckedAt: this.integrityCheckedAt,
       schemaVersion: TASKBOARD_SCHEMA_VERSION,
@@ -1647,6 +1686,7 @@ export class SqliteTaskboardProvider {
       attachmentCount: Number(counts['attachment_count']),
       attachmentBytes: Number(counts['attachment_bytes']),
       cleanupPending,
+      cleanupStalled,
       orphanedClaims: Number(counts['orphaned_claims']),
     }
   }

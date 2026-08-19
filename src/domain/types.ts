@@ -243,6 +243,8 @@ export interface TaskboardStorageHealth {
   readonly attachmentCount: number
   readonly attachmentBytes: number
   readonly cleanupPending: number
+  /** Cleanup entries that exhausted their retry budget; they need a look, not another retry. */
+  readonly cleanupStalled: number
   readonly orphanedClaims: number
 }
 

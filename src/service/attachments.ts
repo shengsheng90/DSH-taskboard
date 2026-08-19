@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { CommentId, TaskId, TaskboardError } from '../domain/index.js'
@@ -86,7 +88,7 @@ export class TaskboardAttachmentRoutes {
     }
     try {
       if (ticket.kind === 'upload') await this.upload(request, response, ticket)
-      else this.download(request, response, ticket)
+      else await this.download(request, response, ticket)
     } catch (error) {
       const status = error instanceof TaskboardError && error.code === 'ATTACHMENT_SIZE_EXCEEDED' ? 413 : 400
       this.reply(response, status, {
@@ -124,14 +126,22 @@ export class TaskboardAttachmentRoutes {
     this.reply(response, 201, created)
   }
 
-  private download(request: IncomingMessage, response: ServerResponse, ticket: DownloadTicket): void {
+  private async download(request: IncomingMessage, response: ServerResponse, ticket: DownloadTicket): Promise<void> {
     if (request.method !== 'GET') {
       this.reply(response, 405, { error: 'method must be GET' })
       return
     }
-    const downloaded = this.provider.readAttachment(ticket.attachmentId, ticket.disposition)
-    response.writeHead(200, { ...downloaded.headers, 'cache-control': 'private, no-store' })
-    response.end(Buffer.from(downloaded.bytes))
+    // Resolve and validate before writing the head, then stream: a 25MB attachment should not be
+    // held in memory in full just to be handed to the socket.
+    const opened = this.provider.openAttachment(ticket.attachmentId, ticket.disposition)
+    response.writeHead(200, { ...opened.headers, 'cache-control': 'private, no-store' })
+    const stream = createReadStream(opened.path)
+    try {
+      await pipeline(stream, response)
+    } catch (cause) {
+      // The head is already sent, so destroy the socket rather than emit a misleading body.
+      response.destroy(cause instanceof Error ? cause : new Error(String(cause)))
+    }
   }
 
   private consume(token: string): Ticket | undefined {
