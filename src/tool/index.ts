@@ -120,7 +120,7 @@ export function taskboardToolDefinitions(service: TaskboardService): ToolDefinit
     }),
     defineTool({
       name: 'taskboard_block',
-      description: 'Block an eligible todo or the owning in-progress claim with a concrete non-empty reason and exact current version.',
+      description: 'Block the in-progress task this Session owns, with a concrete non-empty reason and exact current version. A todo you have not claimed can only be blocked by a human.',
       parameters: {
         task_id: { type: 'string', required: true },
         expected_version: { type: 'integer', required: true },

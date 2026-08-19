@@ -43,6 +43,13 @@ function route(value: string | undefined): { provider: string; model: string } |
   return { provider: value.slice(0, at), model: value.slice(at + 1) }
 }
 
+/** Human edits that a working Session must re-read. These are the activity kinds the provider
+ *  actually writes: the listener used to test for a `task.commented` kind that nothing emits, so
+ *  every human comment on an in-progress task was dropped. */
+const FOLLOWUP_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
+  'task.updated', 'comment.created', 'comment.updated', 'comment.deleted',
+])
+
 function withReasoning(selection: ModelSelection, reasoning: string | undefined): ModelSelection {
   if (reasoning === undefined) return selection
   return { ...selection, reasoningEffort: ReasoningEffortId(reasoning) }
@@ -252,25 +259,47 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
     if (task.status !== 'in_progress') return
     const rule = this.taskboard.provider.getAutomation(claim.automationId)
     const owner = actor(rule, claim)
-    if (goal.phase === 'complete') {
-      this.taskboard.provider.submitReview(
-        task.id, task.version,
-        'Completed',
-        completionResultComment(this.taskboard.provider.getTaskDetail(task.id).comments),
-        owner,
-      )
-    } else if (goal.phase === 'blocked') {
-      this.taskboard.provider.block(task.id, task.version, goal.blockedReason?.message ?? 'Harness Goal blocked', owner)
-    } else {
-      return
+    if (goal.phase !== 'complete' && goal.phase !== 'blocked') return
+    try {
+      if (goal.phase === 'complete') {
+        this.taskboard.provider.submitReview(
+          task.id, task.version,
+          'Completed',
+          completionResultComment(this.taskboard.provider.getTaskDetail(task.id).comments),
+          owner,
+        )
+      } else {
+        // A Goal can report a blank reason, and an empty blocker used to throw TASK_INVALID_INPUT
+        // straight out of the Host's event dispatch.
+        const reason = goal.blockedReason?.message?.trim() ?? ''
+        this.taskboard.provider.block(task.id, task.version, reason === '' ? 'Harness Goal blocked' : reason, owner)
+      }
+    } catch (error) {
+      // The Goal is over but the authoritative task disagrees. Leave it observable instead of
+      // throwing into the listener chain, and still let go of the Session below.
+      this.recordGoalFailure(rule, task, error)
     }
     // Review submission and blocking both retire the claim, so this worker is done with the Session.
     void this.releaseUnclaimed(claim.sessionId)
   }
 
+  private recordGoalFailure(rule: AutomationRule, task: TaskboardTask, error: unknown): void {
+    try {
+      const latest = this.taskboard.provider.getAutomation(rule.id)
+      this.taskboard.provider.recordAutomationDecision(latest.id, latest.version, {
+        kind: 'error',
+        taskId: task.id,
+        message: `Goal handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+        at: Date.now(),
+      }, latest.nextEligibleAt)
+    } catch (_ruleUnavailable) {
+      // Nothing durable left to annotate; the listener still must not throw.
+    }
+  }
+
   private onTaskChanged(event: TaskboardChangeEvent): void {
     if (event.actorKind !== 'human' || event.taskId === undefined
-      || (event.activityKind !== 'task.updated' && event.activityKind !== 'task.commented')) return
+      || event.activityKind === undefined || !FOLLOWUP_ACTIVITY_KINDS.has(event.activityKind)) return
     const claim = this.taskboard.provider.listClaims(['active'])
       .find(item => item.taskId === event.taskId)
     if (claim === undefined) return

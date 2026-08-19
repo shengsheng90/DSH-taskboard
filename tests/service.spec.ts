@@ -400,3 +400,79 @@ test('the integrity scan is explicit and never rides along on a snapshot', () =>
     service.provider.close()
   }
 })
+
+test('archived work is budgeted apart from the live board and stays searchable past the limit', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { ...config, snapshotTaskLimit: 3 })
+  const actor = { kind: 'human', actorId: 'test-human' } as const
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, actor)
+    for (let index = 0; index < 4; index += 1) {
+      const task = service.provider.createTask({ projectId: project.id, title: `Archived ${index}`, creator: 'test-human' }, actor)
+      service.provider.archive(task.id, task.version, actor)
+    }
+    const live = [0, 1, 2].map(index => service.provider.createTask({
+      projectId: project.id, title: `Live ${index}`, creator: 'test-human',
+    }, actor))
+    const needle = service.provider.createTask({ projectId: project.id, title: 'Findable needle', creator: 'test-human' }, actor)
+
+    // One shared budget let a large archive push every live card out of the snapshot and leave
+    // nothing but a truncation notice on the board.
+    const snapshot = service.snapshot(project.id)
+    assert.equal(snapshot.tasks.filter(task => task.archivedAt === undefined).length, 3)
+    assert.equal(snapshot.tasks.filter(task => task.archivedAt !== undefined).length, 4)
+    assert.equal(snapshot.taskTotal, 8)
+    assert.equal(snapshot.tasksTruncated, true)
+    assert.ok(live.every(task => snapshot.tasks.some(row => row.id === task.id)))
+
+    // The board filters in memory, so anything past the limit is only reachable through SQLite.
+    assert.equal(snapshot.tasks.some(task => task.id === needle.id), false)
+    const found = service.dispatchHumanRpc('task.search', { projectId: project.id, search: 'needle' }, actor)
+    assert.equal(found.ok, true)
+    if (!found.ok) return
+    assert.deepEqual((found.value as Array<{ id: string }>).map(task => task.id), [needle.id])
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('the Typert mutation carrier reports the domain code, not a flattened internal', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  try {
+    const result = await service.remoteMutate({
+      endpoint: 'task.accept',
+      payloadJson: JSON.stringify({ taskId: 'missing', expectedVersion: 1 }),
+    })
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    // Callers that switch on the code used to see every conflict, validation error, and genuine
+    // fault as the same `internal`.
+    assert.equal(result.errorCode, 'TASK_NOT_FOUND')
+    assert.equal(result.errorMessage, 'task missing was not found')
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('a replacement change watch releases the waiter its page abandoned', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { ...config, maxChangeWaiters: 2 })
+  try {
+    const revision = service.provider.globalRevision()
+    // An abort is local to the browser and never reaches the Host, so without the watcher id the
+    // abandoned poll held its slot for the whole timeout and a refresh loop filled the pool.
+    const abandoned = service.watchChanges(revision, 30_000, 'page-1')
+    const replacement = service.watchChanges(revision, 30_000, 'page-1')
+    assert.deepEqual(await abandoned, { globalRevision: revision, changed: false })
+
+    const other = service.watchChanges(revision, 30_000, 'page-2')
+    assert.throws(() => service.watchChanges(revision, 30_000, 'page-3'))
+
+    service.provider.createProject({ key: 'DSH', name: 'Harness' }, { kind: 'human', actorId: 'test-human' })
+    assert.equal((await replacement).changed, true)
+    assert.equal((await other).changed, true)
+  } finally {
+    service.provider.close()
+  }
+})

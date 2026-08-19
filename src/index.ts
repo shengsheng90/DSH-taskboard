@@ -71,9 +71,15 @@ export function apply(ctx: Context, config: Config): void {
     service.bindAutomation(automation)
     nativeCtx.effect(() => {
       let stopping = false
+      // Orphan reconciliation is best effort. Binding the scheduler to its success meant one
+      // transient failure (agents service not ready, SQLite momentarily locked) left this Host
+      // process with no automation timer at all until a restart.
       void worker.reconcile().then(
         () => { if (!stopping) automation.start() },
-        error => { nativeCtx.logger.warn(`taskboard startup reconciliation failed: ${String(error)}`) },
+        error => {
+          nativeCtx.logger.warn(`taskboard startup reconciliation failed: ${String(error)}`)
+          if (!stopping) automation.start()
+        },
       )
       return async () => {
         stopping = true

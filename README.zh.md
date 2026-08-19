@@ -60,7 +60,7 @@ pnpm -v    # 11.x
 | Profile 目录 | `$DSH_HOME/profiles/<profile>`，通常是 `~/.dsh/profiles/web` |
 | 打包文件名 | `shengsheng-dsh-taskboard-<version>.tgz` |
 
-`<version>` 以本仓库 `package.json` 为准（撰写时为 `0.1.0`）。`pnpm pack` 之后使用实际生成的 tarball。
+`<version>` 以本仓库 `package.json` 当前声明的版本为准——去那里读，不要照抄本文里的数字。`pnpm pack` 之后使用实际生成的 tarball。
 
 给 Harness 内代理使用的一键粘贴提示词见 [docs/install-plugin-prompt.zh.md](docs/install-plugin-prompt.zh.md)。下面是规范安装步骤。
 
@@ -104,7 +104,7 @@ pnpm pack
 记下 tarball 的绝对路径，例如：
 
 ```text
-/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-0.1.0.tgz
+/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
 若仓库已经克隆且依赖已安装，执行 `pnpm build && pnpm pack` 即可。可选本地检查：`pnpm typecheck`、`pnpm test`、`pnpm example`。
@@ -114,7 +114,7 @@ pnpm pack
 profile 目录是 pnpm workspace 根（`packages: [.]`）。**必须**带 `-w`（workspace root）。不加时 pnpm 会报 `ERR_PNPM_ADDING_TO_ROOT`。
 
 ```sh
-dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-0.1.0.tgz
+dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
 优先安装打包后的 tarball，不要直接加源码目录。源码目录若未 build，会缺 `lib/`。
@@ -269,7 +269,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 | `taskboard_claim` | 用 `expected_version` 认领一条合格 `todo` |
 | `taskboard_comment` | 追加 Markdown 评论 |
 | `taskboard_submit_review` | 把持有的 `in_progress` 工作提交到 `in_review` |
-| `taskboard_block` | 用具体原因阻塞 |
+| `taskboard_block` | 用具体原因阻塞自己拥有的 `in_progress` 任务 |
 | `taskboard_release_claim` | 只释放当前 Agent 的认领 |
 | `taskboard_relate` | 在同一项目内添加 `parent`、`blocks` 或 `related` |
 

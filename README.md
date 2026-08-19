@@ -60,7 +60,7 @@ Use these constants. Read live values from disk; do not invent a different packa
 | Profile directory | `$DSH_HOME/profiles/<profile>` , usually `~/.dsh/profiles/web` |
 | Packed tarball name | `shengsheng-dsh-taskboard-<version>.tgz` |
 
-`<version>` comes from this repo's `package.json` (`0.1.0` at the time of writing). After `pnpm pack`, use the tarball that was actually written.
+`<version>` is whatever this repo's `package.json` currently declares — read it there rather than copying a number out of this document. After `pnpm pack`, use the tarball that was actually written.
 
 A longer copy-paste prompt for a Harness-side agent is in [docs/install-plugin-prompt.zh.md](docs/install-plugin-prompt.zh.md). The steps below are the normative English procedure.
 
@@ -104,7 +104,7 @@ Expected artifacts:
 Record the absolute tarball path. Example:
 
 ```text
-/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-0.1.0.tgz
+/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
 If this repository is already cloned and dependencies are installed, `pnpm build && pnpm pack` is enough. Optional local checks: `pnpm typecheck`, `pnpm test`, `pnpm example`.
@@ -114,7 +114,7 @@ If this repository is already cloned and dependencies are installed, `pnpm build
 The profile directory is a pnpm workspace root (`packages: [.]`). The `-w` / workspace-root flag is **mandatory**. Without it, pnpm fails with `ERR_PNPM_ADDING_TO_ROOT`.
 
 ```sh
-dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-0.1.0.tgz
+dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
 Prefer the packed tarball over the source directory. A source-directory add can miss `lib/` if the tree was not built.
@@ -269,7 +269,7 @@ Models must use the in-process tools. Do not shell out to `dsh-taskboard` from a
 | `taskboard_claim` | Claim one eligible `todo` with `expected_version` |
 | `taskboard_comment` | Append a Markdown comment |
 | `taskboard_submit_review` | Move owned `in_progress` work to `in_review` |
-| `taskboard_block` | Block with a concrete reason |
+| `taskboard_block` | Block the owned `in_progress` task with a concrete reason |
 | `taskboard_release_claim` | Release only the current Agent's claim |
 | `taskboard_relate` | Add `parent`, `blocks`, or `related` in the same project |
 

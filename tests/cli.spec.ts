@@ -126,3 +126,32 @@ test('CLI round-trips project, task, relation, attachment, workflow, automation,
   second = invoke(['task', 'archive', '--task', second.id, '--version', String(second.version)]) as typeof second
   invoke(['task', 'delete', '--task', second.id, '--version', String(second.version)])
 })
+
+test('CLI task creation refuses a status the lifecycle does not own', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-status-'))
+  t.after(() => { rmSync(directory, { recursive: true, force: true }) })
+  const database = join(directory, 'taskboard.sqlite')
+  const cli = (args: string[]): { code: number; stdout: string; stderr: string } => {
+    let stdout = ''
+    let stderr = ''
+    const code = runTaskboardCli(['--database', database, ...args], {
+      stdout: value => { stdout += value },
+      stderr: value => { stderr += value },
+    })
+    return { code, stdout, stderr }
+  }
+  const project = JSON.parse(cli(['project', 'create', '--key', 'DSH', '--name', 'Harness']).stdout).value as { id: string }
+
+  // A cast used to be the only gate on the flag, and --request-json had no second check at all.
+  const flagged = cli(['task', 'create', '--project', project.id, '--title', 'Smuggled', '--status', 'done'])
+  assert.notEqual(flagged.code, 0)
+  assert.match(flagged.stderr, /TASK_INVALID_INPUT/)
+  const payload = cli(['task', 'create', '--request-json', JSON.stringify({
+    projectId: project.id, title: 'Smuggled again', creator: 'cli', status: 'done',
+  })])
+  assert.notEqual(payload.code, 0)
+  assert.match(payload.stderr, /TASK_INVALID_INPUT/)
+
+  assert.equal(cli(['task', 'create', '--project', project.id, '--title', 'Allowed', '--status', 'todo']).code, 0)
+  assert.equal((JSON.parse(cli(['task', 'list', '--project', project.id]).stdout).value as unknown[]).length, 1)
+})
