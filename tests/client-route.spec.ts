@@ -49,7 +49,9 @@ test('new Session draft carries the exact task identity, current facts, and huma
       version: 4, createdAt: 1, updatedAt: 1,
     },
     comments: [{ id: 'comment-one' as never, taskId: 'task-opaque' as never, body: 'Preserve the draft.', authorId: 'human', version: 1, createdAt: 1, updatedAt: 1 }],
-    activities: [], relations: [],
+    activities: [],
+    activityTotal: 0,
+    relations: [],
     attachments: [{ id: 'attachment-one' as never, taskId: 'task-opaque' as never, filename: 'spec.md', contentType: 'text/markdown', byteSize: 12, createdAt: 1 }],
     claims: [], globalRevision: 8,
   })
@@ -156,7 +158,7 @@ test('explicit new Session creation carries an unsent task draft and returns the
       id: 'task-one' as never, projectId: 'project-one' as never, identifier: 'DSH-9', title: 'Handoff', description: '',
       status: 'todo', priority: 'medium', labels: [], sortOrder: 1, creator: 'human', version: 2, createdAt: 1, updatedAt: 1,
     },
-    comments: [], activities: [], relations: [], attachments: [], claims: [], globalRevision: 2,
+    comments: [], activities: [], activityTotal: 0, relations: [], attachments: [], claims: [], globalRevision: 2,
   })
   assert.equal(sessionId, 'session-native')
   assert.equal(captured?.workspaceId, 'workspace-one')

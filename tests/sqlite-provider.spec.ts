@@ -487,3 +487,54 @@ test('records automation run history when a scheduler decision is persisted', ()
     provider.close()
   }
 })
+
+test('task detail bounds the activity log and always reports its true size', () => {
+  const provider = memoryProvider()
+  try {
+    const task = seed(provider)
+    let version = task.version
+    for (let index = 0; index < 12; index += 1) {
+      version = provider.updateTask(task.id, version, { description: `revision ${index}` }, human).version
+    }
+    // 1 creation + 12 updates
+    const full = provider.getTaskDetail(task.id)
+    assert.equal(full.activityTotal, 13)
+    assert.equal(full.activities.length, 13)
+
+    const windowed = provider.getTaskDetail(task.id, { activityLimit: 4 })
+    assert.equal(windowed.activityTotal, 13)
+    assert.equal(windowed.activities.length, 4)
+    // Newest rows, still presented oldest-first.
+    assert.deepEqual(windowed.activities.map(activity => activity.kind), Array.from({ length: 4 }, () => 'task.updated'))
+    assert.deepEqual(
+      windowed.activities.map(activity => activity.id),
+      full.activities.slice(-4).map(activity => activity.id),
+    )
+
+    const omitted = provider.getTaskDetail(task.id, { activityLimit: 0 })
+    assert.deepEqual(omitted.activities, [])
+    assert.equal(omitted.activityTotal, 13)
+  } finally {
+    provider.close()
+  }
+})
+
+test('countTasks reports totals independently of the requested page', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    for (let index = 0; index < 7; index += 1) {
+      provider.createTask({ projectId: project.id, title: `Task ${index}`, creator: human.actorId }, human)
+    }
+    const first = provider.createTask({ projectId: project.id, title: 'Archived', creator: human.actorId }, human)
+    provider.archive(first.id, first.version, human)
+
+    assert.equal(provider.listTasks({ projectId: project.id, limit: 3 }).length, 3)
+    assert.equal(provider.countTasks({ projectId: project.id }), 7)
+    assert.equal(provider.countTasks({ projectId: project.id, includeArchived: true }), 8)
+    assert.equal(provider.countTasks({ projectId: project.id, statuses: ['todo'] }), 0)
+    assert.equal(provider.countTasks({ projectId: project.id, search: 'Task 3' }), 1)
+  } finally {
+    provider.close()
+  }
+})

@@ -264,6 +264,8 @@ const AUTOMATION_RUN_KEEP = 80
 const STATEMENT_CACHE_LIMIT = 256
 /** Hard ceiling for one task page; callers ask for less and learn the total from countTasks. */
 export const TASK_PAGE_LIMIT = 2_000
+/** Newest activity rows returned by default; the log itself is unbounded per task. */
+export const DEFAULT_ACTIVITY_LIMIT = 50
 
 /** Local transactional Taskboard authority backed by one SQLite database. */
 export class SqliteTaskboardProvider {
@@ -424,10 +426,18 @@ export class SqliteTaskboardProvider {
     return mapTask(row)
   }
 
-  getTaskDetail(taskId: TaskboardTaskId): TaskDetail {
+  /** `activityLimit` bounds the oldest-first activity log, which grows without limit per task.
+   *  Pass 0 to omit it entirely; callers that do not render or read history should. */
+  getTaskDetail(taskId: TaskboardTaskId, options: { readonly activityLimit?: number } = {}): TaskDetail {
     const task = this.getTask(taskId)
     const comments = (this.sql('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at, rowid').all(taskId) as Row[]).map(mapComment)
-    const activities = (this.sql('SELECT * FROM task_activities WHERE task_id = ? ORDER BY created_at, rowid').all(taskId) as Row[]).map(mapActivity)
+    const activityLimit = Math.max(0, Math.trunc(options.activityLimit ?? DEFAULT_ACTIVITY_LIMIT))
+    const activityTotal = Number((this.sql('SELECT COUNT(*) AS count FROM task_activities WHERE task_id = ?').get(taskId) as Row)['count'])
+    // Take the newest rows, then restore oldest-first order for display.
+    const activities = activityLimit === 0
+      ? []
+      : (this.sql('SELECT * FROM task_activities WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?')
+          .all(taskId, activityLimit) as Row[]).map(mapActivity).reverse()
     const relations = (this.sql('SELECT * FROM task_relations WHERE source_task_id = ? OR target_task_id = ? ORDER BY created_at, rowid').all(taskId, taskId) as Row[]).map(mapRelation)
     const attachments = (this.sql('SELECT * FROM attachments WHERE task_id = ? ORDER BY created_at, rowid').all(taskId) as Row[]).map(mapAttachment)
     const active = this.activeClaimRow(taskId)
@@ -436,6 +446,7 @@ export class SqliteTaskboardProvider {
       task,
       comments,
       activities,
+      activityTotal,
       relations,
       attachments,
       ...(active === undefined ? {} : { activeClaim: mapClaim(active) }),

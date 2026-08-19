@@ -282,7 +282,10 @@ export class TaskboardService extends TypertRemoteService {
   }
 
   taskDetail(taskId: TaskboardTaskId): TaskDetail {
-    const detail = this.provider.getTaskDetail(taskId)
+    // The native page renders no activity timeline, and the log grows without bound per task.
+    // Shipping it on every detail open and every refresh was pure transfer cost; activityTotal
+    // still reports how much history exists. Raise this when the page renders one.
+    const detail = this.provider.getTaskDetail(taskId, { activityLimit: 0 })
     const agents = this.hostCtx.get('agents') as undefined | {
       get(id: string): undefined | {
         status: 'idle' | 'running'

@@ -208,7 +208,10 @@ export interface FreshClaimRequest {
 export interface TaskDetail {
   readonly task: TaskboardTask
   readonly comments: readonly TaskboardComment[]
+  /** Bounded newest-window of the activity log, oldest-first. Empty when the caller asked for none. */
   readonly activities: readonly TaskboardActivity[]
+  /** Total stored activity rows, so a bounded window never reads as the whole history. */
+  readonly activityTotal: number
   readonly relations: readonly TaskboardRelation[]
   readonly attachments: readonly TaskboardAttachment[]
   readonly activeClaim?: TaskboardClaim

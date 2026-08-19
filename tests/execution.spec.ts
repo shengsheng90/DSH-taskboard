@@ -20,6 +20,7 @@ test('native worker binds workspace, persists task input, follows human changes,
   const createdGoals: unknown[] = []
   const attachedSessions: string[] = []
   const createOptions: Array<Record<string, unknown>> = []
+  const disposed: string[] = []
   let activeAgent: {
     id: string
     followup(message: Message): void
@@ -45,7 +46,7 @@ test('native worker binds workspace, persists task input, follows human changes,
         followup: message => { messages.push(message) },
         whenIdle: () => Promise.resolve(),
       }
-      return { agent: activeAgent, dispose: () => Promise.resolve() }
+      return { agent: activeAgent, dispose: () => { disposed.push(options.sessionId); return Promise.resolve() } }
     },
     resume: async () => { throw new Error('unexpected resume') },
   } as never)
@@ -108,6 +109,12 @@ test('native worker binds workspace, persists task input, follows human changes,
     assert.equal(reviewed.status, 'in_review')
     assert.match(service.provider.getTaskDetail(task.id).comments.at(-1)?.body ?? '', /Work completed/)
     assert.equal(service.provider.getTask(task.id).description, 'New durable requirement.')
+
+    // The handle is held while the claim is active, so human edits still reach an idle Agent,
+    // and released once review submission retires the claim -- otherwise a long-lived Host keeps
+    // one Agent handle per completed task forever.
+    assert.deepEqual(disposed, [activeClaim.sessionId])
+    assert.equal((worker as unknown as { handles: Map<string, unknown> }).handles.size, 0)
 
     await worker.stop()
   } finally {
