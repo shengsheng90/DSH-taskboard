@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Message } from '@deepseek-ai/dsh-llm'
+import { TaskboardError } from '../src/domain/index.js'
 import type { HumanActor } from '../src/domain/index.js'
 import { completionResultComment, HarnessTaskboardWorker } from '../src/execution/index.js'
 import { TaskboardService } from '../src/service/index.js'
@@ -256,4 +257,117 @@ test('native worker fails loudly when Host default model is missing and modelRou
 test('goal completion writes a result comment and does not copy existing comments', () => {
   assert.equal(completionResultComment([]), 'Work completed.')
   assert.equal(completionResultComment([{ body: 'Implemented the endpoint.' }]), 'Ready for review.')
+})
+
+test('human comments on a claimed task reach the owning Session, and a blank Goal blocker is survivable', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  const messages: Message[] = []
+  let activeAgent: { id: string; followup(message: Message): void; whenIdle(): Promise<void> } | undefined
+  ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  provideDefaultModel(ctx)
+  ctx.provide('workspaceRegistry', { get: () => ({ path: '/workspace/project', attachSession: async () => undefined }) } as never)
+  ctx.provide('goals', { get: () => undefined, create: () => ({ id: 'goal-1' }) } as never)
+  ctx.provide('agents', {
+    list: () => activeAgent === undefined ? [] : [{ id: activeAgent.id }],
+    create: async (options: { sessionId: string; setup(context: Context): Promise<void> }) => {
+      await options.setup(new Context())
+      activeAgent = { id: options.sessionId, followup: message => { messages.push(message) }, whenIdle: () => Promise.resolve() }
+      return { agent: activeAgent, dispose: () => Promise.resolve() }
+    },
+    resume: async () => { throw new Error('unexpected resume') },
+  } as never)
+
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness', workspaceId: 'workspace-1' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'Commented', creator: human.actorId }, human)
+    task = service.provider.approve(task.id, task.version, human)
+    const rule = service.provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1,
+      quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+    }, human)
+    const worker = new HarnessTaskboardWorker(ctx, service)
+    await worker.start(rule, task)
+    // One message so far: the initial instruction.
+    assert.equal(messages.length, 1)
+
+    // The provider writes `comment.created` / `comment.updated`; the listener used to test for a
+    // `task.commented` kind that nothing emits, so human comments never reached the Session.
+    const claimed = service.provider.getTask(task.id)
+    service.provider.comment(claimed.id, claimed.version, 'Also cover the blank-input case.', human)
+    assert.equal(messages.length, 2)
+    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /changed after your claim/)
+    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /Also cover the blank-input case/)
+
+    const commentId = service.provider.getTaskDetail(task.id).comments.at(-1)?.id ?? ''
+    const beforeEdit = service.provider.getTask(task.id)
+    service.provider.updateComment(beforeEdit.id, beforeEdit.version, commentId, 'Cover the whitespace case instead.', human)
+    assert.equal(messages.length, 3)
+    assert.match(messages[2]?.content[0]?.type === 'text' ? messages[2].content[0].text : '', /whitespace case/)
+
+    // A Goal can report a blank reason. `requiredText` used to throw that straight out of the Host
+    // event dispatch, leaving the task in progress and the Session handle held.
+    assert.ok(activeAgent)
+    ;(worker as unknown as { onGoalChanged(agent: unknown, goal: unknown): void }).onGoalChanged(activeAgent, {
+      id: 'goal-1', phase: 'blocked', objective: 'blocked task', blockedReason: { message: '   ' }, createdAt: 1, updatedAt: 2,
+    })
+    assert.equal(service.provider.getTask(task.id).status, 'blocked')
+    assert.match(service.provider.getTaskDetail(task.id).comments.at(-1)?.body ?? '', /Blocked: Harness Goal blocked/)
+    await worker.stop()
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('a Goal that outlives its claim records the failure instead of throwing at the Host', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  let activeAgent: { id: string; followup(): void; whenIdle(): Promise<void> } | undefined
+  ctx.provide('agentPresets', { mount: async () => undefined } as never)
+  provideDefaultModel(ctx)
+  ctx.provide('workspaceRegistry', { get: () => ({ path: '/workspace/project', attachSession: async () => undefined }) } as never)
+  ctx.provide('goals', { get: () => undefined, create: () => ({ id: 'goal-1' }) } as never)
+  ctx.provide('agents', {
+    list: () => activeAgent === undefined ? [] : [{ id: activeAgent.id }],
+    create: async (options: { sessionId: string; setup(context: Context): Promise<void> }) => {
+      await options.setup(new Context())
+      activeAgent = { id: options.sessionId, followup: () => undefined, whenIdle: () => Promise.resolve() }
+      return { agent: activeAgent, dispose: () => Promise.resolve() }
+    },
+    resume: async () => { throw new Error('unexpected resume') },
+  } as never)
+
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness', workspaceId: 'workspace-1' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'Raced', creator: human.actorId }, human)
+    task = service.provider.approve(task.id, task.version, human)
+    const rule = service.provider.createAutomation(project.id, {
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1,
+      quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+    }, human)
+    const worker = new HarnessTaskboardWorker(ctx, service)
+    await worker.start(rule, task)
+    assert.ok(activeAgent)
+    // Force the mutation to fail the way a cross-process write would: the version the listener
+    // reads no longer matches by the time it writes.
+    const patched = service.provider as unknown as { submitReview(...args: unknown[]): unknown }
+    const original = patched.submitReview.bind(service.provider)
+    patched.submitReview = () => { throw new TaskboardError('task version changed during transition', 'TASK_STALE_VERSION') }
+    try {
+      ;(worker as unknown as { onGoalChanged(agent: unknown, goal: unknown): void }).onGoalChanged(activeAgent, {
+        id: 'goal-1', phase: 'complete', objective: 'done task', createdAt: 1, updatedAt: 2,
+      })
+    } finally {
+      patched.submitReview = original
+    }
+    const runs = service.provider.listAutomationRuns(project.id)
+    assert.ok(runs.some(run => run.decision.kind === 'error' && /Goal handoff failed/.test(run.decision.message)))
+    // The authoritative task is untouched and the claim survives, so the Session handle is still
+    // legitimately held; what must not happen is the domain error escaping the listener.
+    assert.equal(service.provider.getTask(task.id).status, 'in_progress')
+    assert.equal(service.provider.getTaskDetail(task.id).activeClaim?.state, 'active')
+    await worker.stop()
+  } finally {
+    service.provider.close()
+  }
 })

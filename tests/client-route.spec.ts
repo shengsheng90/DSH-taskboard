@@ -142,7 +142,15 @@ test('client change watch uses the plugin Remote carrier and preserves revision 
   )
   assert.deepEqual(await controller.watchChanges(6), { globalRevision: 7, changed: true })
   assert.equal(request?.endpoint, 'changes.watch')
-  assert.deepEqual(JSON.parse(request?.payloadJson ?? 'null'), { afterRevision: 6, timeoutMs: 10_000 })
+  const payload = JSON.parse(request?.payloadJson ?? 'null') as { afterRevision: number; timeoutMs: number; watcherId: string }
+  assert.equal(payload.afterRevision, 6)
+  assert.equal(payload.timeoutMs, 10_000)
+  // The watcher id lets the Host release the waiter this page abandons on abort, so it has to be
+  // present and stable for the life of the controller.
+  assert.equal(typeof payload.watcherId, 'string')
+  assert.ok(payload.watcherId.length > 0)
+  await controller.watchChanges(7)
+  assert.equal((JSON.parse(request?.payloadJson ?? 'null') as { watcherId: string }).watcherId, payload.watcherId)
 })
 
 test('explicit new Session creation carries an unsent task draft and returns the native Session id', async () => {

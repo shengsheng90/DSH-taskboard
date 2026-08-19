@@ -3,7 +3,7 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TaskboardSnapshot } from '../service/index.js'
 import { TASK_STATUSES } from '../domain/index.js'
 import type {
-  TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
+  TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskboardTask, TaskDetail,
 } from '../domain/index.js'
 
 export type TaskboardView = 'dashboard' | 'board' | 'list' | 'labels' | 'gantt' | 'workflows'
@@ -308,11 +308,19 @@ export function encodeTaskboardRoute(route: TaskboardRoute): string {
   return `#taskboard/${project}/${route.view}${task}`
 }
 
+function watcherId(): string {
+  const random = globalThis.crypto as { randomUUID?: () => string } | undefined
+  return random?.randomUUID?.() ?? `watcher-${String(Math.trunc(Math.random() * 1e12))}`
+}
+
 /** Browser-local page state and route codec; business state always comes from the Host. */
 export class TaskboardClientController {
   private route = parseRoute()
   private listeners = new Set<() => void>()
   private globalRevision: number | undefined
+  /** Identifies this page's long-poll loop so the Host can release a waiter this page abandoned:
+   *  an abort is local and never reaches the Host, so the old waiter held its slot until timeout. */
+  private readonly watcherId = watcherId()
 
   constructor(
     readonly connection: ConnectionHandle,
@@ -394,11 +402,16 @@ export class TaskboardClientController {
     return JSON.parse(carried.value.valueJson ?? 'null') as unknown
   }
 
+  /** Search the whole project in SQLite. The board can only filter the tasks a snapshot carried. */
+  async searchTasks(projectId: string, search: string, signal?: AbortSignal): Promise<TaskboardTask[]> {
+    return await this.mutate('task.search', { projectId, search }, signal) as TaskboardTask[]
+  }
+
   async watchChanges(afterRevision: number, signal?: AbortSignal): Promise<TaskboardChangeWatchResult> {
     signal?.throwIfAborted()
     const carried = await this.remote.mutate({
       endpoint: 'changes.watch',
-      payloadJson: JSON.stringify({ afterRevision, timeoutMs: 10_000 }),
+      payloadJson: JSON.stringify({ afterRevision, timeoutMs: 10_000, watcherId: this.watcherId }),
     })
     signal?.throwIfAborted()
     if (!carried.ok) throw new Error(carried.error.message)

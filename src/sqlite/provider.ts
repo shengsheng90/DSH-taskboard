@@ -407,7 +407,13 @@ export class SqliteTaskboardProvider {
   createTask(request: CreateTaskRequest, actor: TaskboardActor): TaskboardTask {
     const title = requiredText(request.title, 'task title')
     const creator = requiredText(request.creator, 'task creator')
-    if (request.status === 'todo') requireHuman(actor, 'approve task at creation')
+    // The table CHECK accepts all seven statuses, so an unvalidated RPC or CLI payload could open a
+    // task straight at `done` or `in_progress` and skip the human-owned lifecycle entirely.
+    const status = request.status ?? 'backlog'
+    if (status !== 'backlog' && status !== 'todo') {
+      throw new TaskboardError(`task creation cannot start at ${String(status)}`, 'TASK_INVALID_INPUT', { status })
+    }
+    if (status === 'todo') requireHuman(actor, 'approve task at creation')
     this.validateDevelopmentContext(request.developmentContext)
     this.validateTaskFields(request)
     const taskId = TaskId(id('task'))
@@ -422,7 +428,7 @@ export class SqliteTaskboardProvider {
           development_context_json, source_json, archived_at, version, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
       `).run(
-        taskId, request.projectId, identifier, title, request.description ?? '', request.status ?? 'backlog',
+        taskId, request.projectId, identifier, title, request.description ?? '', status,
         request.priority ?? 'none', json(request.labels ?? []), request.sortOrder ?? project.nextIssueNumber * 1000,
         request.assignee ?? null, creator, request.startDate ?? null, request.dueDate ?? null,
         request.recurrence === undefined ? null : json(request.recurrence), request.workflowId ?? null,
@@ -431,7 +437,7 @@ export class SqliteTaskboardProvider {
       )
       this.sql('UPDATE projects SET next_issue_number = next_issue_number + 1, version = version + 1, updated_at = ? WHERE id = ?')
         .run(timestamp, request.projectId)
-      this.activity(taskId, 'task.created', actor, undefined, { identifier, status: request.status ?? 'backlog' }, timestamp)
+      this.activity(taskId, 'task.created', actor, undefined, { identifier, status }, timestamp)
       this.bumpRevision()
     })
     return this.getTask(taskId)
@@ -476,7 +482,8 @@ export class SqliteTaskboardProvider {
     this.getProject(filter.projectId)
     const clauses = ['project_id = ?']
     const values: SqlValue[] = [filter.projectId]
-    if (filter.includeArchived !== true) clauses.push('archived_at IS NULL')
+    if (filter.archivedOnly === true) clauses.push('archived_at IS NOT NULL')
+    else if (filter.includeArchived !== true) clauses.push('archived_at IS NULL')
     if (filter.statuses !== undefined && filter.statuses.length > 0) {
       clauses.push(`status IN (${filter.statuses.map(() => '?').join(',')})`)
       values.push(...filter.statuses)
@@ -561,23 +568,7 @@ export class SqliteTaskboardProvider {
       if (this.activeClaimRow(taskId) !== undefined) {
         throw new TaskboardError('task already has an active claim', 'TASK_ALREADY_CLAIMED', { taskId })
       }
-      if (current.developmentContext !== undefined
-        && !(current.developmentContext.kind === 'worktree' && this.attachmentOptions.allowSharedWorktrees)) {
-        const conflict = this.sql(`
-          SELECT tasks.identifier
-          FROM task_claims claims JOIN tasks ON tasks.id = claims.task_id
-          WHERE claims.state IN ('active','orphaned') AND claims.task_id <> ?
-            AND claims.development_context_json = ?
-          ORDER BY claims.claimed_at LIMIT 1
-        `).get(taskId, json(current.developmentContext)) as Row | undefined
-        if (conflict !== undefined) {
-          throw new TaskboardError(
-            `development context is already owned by ${String(conflict['identifier'])}`,
-            'TASK_DEVELOPMENT_CONTEXT_BUSY',
-            { task: conflict['identifier'] },
-          )
-        }
-      }
+      this.assertDevelopmentContextFree(taskId, current.developmentContext)
       const dependency = this.sql(`
         SELECT dependency.identifier, dependency.status
         FROM task_relations relation
@@ -686,6 +677,11 @@ export class SqliteTaskboardProvider {
       if (current.status === target && sortOrder === undefined) {
         throw new TaskboardError('task update contains no fields', 'TASK_INVALID_INPUT')
       }
+      // A board drag creates no claim, so nothing used to stop a card from entering an exclusive
+      // branch or worktree that an Agent is already working in.
+      if (target === 'in_progress' && current.status !== 'in_progress') {
+        this.assertDevelopmentContextFree(taskId, current.developmentContext)
+      }
       const timestamp = now()
       if (current.status === 'in_progress' && target !== 'in_progress') {
         this.sql("UPDATE task_claims SET state = 'released', updated_at = ? WHERE task_id = ? AND state IN ('active','orphaned')")
@@ -708,7 +704,12 @@ export class SqliteTaskboardProvider {
     return this.transaction(() => {
       const current = this.mutableTask(taskId, expectedVersion)
       requireStatus(current.status, ['todo', 'in_progress'], 'block')
-      if (actor.kind !== 'human' && current.status === 'in_progress') this.assertOwningClaim(taskId, actor)
+      if (actor.kind !== 'human') {
+        // A `todo` has no owner, so this let any Session with the tool blank out a whole column of
+        // work it had never claimed. Blocking a todo stays a human decision.
+        requireStatus(current.status, ['in_progress'], 'Agent block')
+        this.assertOwningClaim(taskId, actor)
+      }
       const timestamp = now()
       this.insertComment(taskId, `Blocked: ${body}`, actor, timestamp)
       this.writeStatus(taskId, expectedVersion, 'blocked', timestamp)
@@ -1400,6 +1401,7 @@ export class SqliteTaskboardProvider {
     if (this.activeClaimRow(taskId) !== undefined) {
       throw new TaskboardError('task already has an active claim', 'TASK_ALREADY_CLAIMED', { taskId })
     }
+    this.assertDevelopmentContextFree(taskId, developmentContext)
     const claimId = ClaimId(id('claim'))
     this.sql(`
       INSERT INTO task_claims(id, task_id, session_id, agent_id, automation_id, expected_task_version, state, development_context_json, claimed_at, updated_at)
@@ -1490,6 +1492,36 @@ export class SqliteTaskboardProvider {
       cursor = row === undefined ? undefined : TaskId(String(row['target_task_id']))
     }
     return false
+  }
+
+  /** Reject a second owner on an exclusive branch or worktree.
+   *  Two rows can hold one context: a live claim, and a task a human moved into `in_progress`
+   *  without any claim at all. Both used to be invisible to every path except `claim()`. */
+  private assertDevelopmentContextFree(taskId: TaskboardTaskId, context: DevelopmentContext | undefined): void {
+    if (context === undefined) return
+    if (context.kind === 'worktree' && this.attachmentOptions.allowSharedWorktrees) return
+    const encoded = json(context)
+    const conflict = this.sql(`
+      SELECT tasks.identifier
+      FROM tasks
+      WHERE tasks.id <> ?
+        AND (
+          (tasks.status = 'in_progress' AND tasks.development_context_json = ?)
+          OR EXISTS (
+            SELECT 1 FROM task_claims claims
+            WHERE claims.task_id = tasks.id AND claims.state IN ('active','orphaned')
+              AND claims.development_context_json = ?
+          )
+        )
+      ORDER BY tasks.identifier LIMIT 1
+    `).get(taskId, encoded, encoded) as Row | undefined
+    if (conflict !== undefined) {
+      throw new TaskboardError(
+        `development context is already owned by ${String(conflict['identifier'])}`,
+        'TASK_DEVELOPMENT_CONTEXT_BUSY',
+        { task: conflict['identifier'] },
+      )
+    }
   }
 
   private validateDevelopmentContext(context: DevelopmentContext | null | undefined): void {

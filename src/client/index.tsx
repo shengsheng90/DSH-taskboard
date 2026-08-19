@@ -7,8 +7,8 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {
-  AutomationRule, AutomationRun, SavedWorkflow, TaskboardProject, TaskboardTask, TaskDetail as TaskDetailData,
-  WorkflowDocument,
+  AutomationRule, AutomationRun, SavedWorkflow, TaskboardChangeWatchResult, TaskboardProject, TaskboardTask,
+  TaskDetail as TaskDetailData, WorkflowDocument,
 } from '../domain/index.js'
 import { TASK_STATUSES } from '../domain/index.js'
 import type { TaskboardSnapshot } from '../service/index.js'
@@ -105,6 +105,19 @@ function actorInitial(value: string): string {
 
 function isClosedStatus(status: TaskboardTask['status']): boolean {
   return status === 'done' || status === 'canceled'
+}
+
+/** Backoff before the change poll is retried, and the idle delay before a truncated project's
+ *  search reaches SQLite. */
+const WATCH_RETRY_MS = 2_000
+const SEARCH_DEBOUNCE_MS = 250
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    const timer = window.setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+    function onAbort(): void { window.clearTimeout(timer); resolve() }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 const MARKDOWN_TOOLBAR: readonly { action: MarkdownEditAction; label: 'mdHeading' | 'mdBold' | 'mdItalic' | 'mdQuote' | 'mdCode' | 'mdLink' | 'mdBullet' | 'mdNumber'; glyph: string }[] = [
@@ -273,6 +286,9 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const [error, setError] = useState<string>()
   const [refreshKey, setRefreshKey] = useState(0)
   const [query, setQuery] = useState('')
+  /** Matches from SQLite for a project whose snapshot was truncated; the in-memory filter below
+   *  can only ever see the rows the snapshot carried. */
+  const [searchHits, setSearchHits] = useState<readonly TaskboardTask[]>([])
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [logOpen, setLogOpen] = useState(false)
   const [undo, setUndo] = useState<{ endpoint: string; payload: Record<string, unknown> }>()
@@ -332,7 +348,17 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
     const watch = async (): Promise<void> => {
       let revision = snapshot.globalRevision
       while (!abort.signal.aborted) {
-        const result = await controller.watchChanges(revision, abort.signal)
+        let result: TaskboardChangeWatchResult
+        try {
+          result = await controller.watchChanges(revision, abort.signal)
+        } catch (cause) {
+          if (abort.signal.aborted) return
+          setError(cause instanceof Error ? cause.message : String(cause))
+          // Leaving the loop here left the page on the 15s periodic refetch until the revision
+          // happened to move, which is exactly when it could not move on its own.
+          await pause(WATCH_RETRY_MS, abort.signal)
+          continue
+        }
         if (abort.signal.aborted) return
         if (result.changed || result.globalRevision !== revision) {
           // A local mutation already refreshes on its own. Without this guard its committed
@@ -343,11 +369,27 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         revision = result.globalRevision
       }
     }
-    void watch().catch((cause: unknown) => {
-      if (!abort.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause))
-    })
+    void watch()
     return () => { abort.abort() }
   }, [controller, route.open, snapshot?.globalRevision])
+
+  // Only a truncated project needs SQLite: otherwise the snapshot already holds every task the
+  // in-memory filter below could match.
+  useEffect(() => {
+    const needle = query.trim()
+    const projectId = route.projectId
+    if (!route.open || snapshot?.tasksTruncated !== true || needle === '' || projectId === undefined) {
+      setSearchHits([])
+      return
+    }
+    const abort = new AbortController()
+    const timer = window.setTimeout(() => {
+      controller.searchTasks(projectId, needle, abort.signal).then(hits => {
+        if (!abort.signal.aborted) setSearchHits(hits)
+      }, () => { /* the local filter still answers for everything the snapshot holds */ })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => { abort.abort(); window.clearTimeout(timer) }
+  }, [controller, query, route.open, route.projectId, snapshot?.tasksTruncated, refreshKey])
 
   useEffect(() => {
     if (!route.open) return
@@ -379,13 +421,19 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   if (!route.open) return null
   const selected = snapshot?.projects.find(project => project.id === route.projectId) ?? snapshot?.projects[0]
   const tasks = snapshot?.tasks ?? []
-  const visibleTasks = tasks.filter(task => {
+  const searchable = searchHits.length === 0
+    ? tasks
+    : [...tasks, ...searchHits.filter(hit => !tasks.some(task => task.id === hit.id))]
+  const visibleTasks = searchable.filter(task => {
     if (statusFilter !== 'all' && task.status !== statusFilter) return false
     const needle = query.trim().toLocaleLowerCase()
     return needle === ''
       || `${task.identifier} ${task.title} ${task.description} ${task.labels.join(' ')}`.toLocaleLowerCase().includes(needle)
   })
+  // A deep link can name a task the snapshot never carried. The detail fetch is keyed on
+  // route.taskId alone, so open the dialog on whichever of the two resolved it.
   const selectedTask = tasks.find(task => task.id === route.taskId)
+    ?? (detail !== undefined && detail.task.id === route.taskId ? detail.task : undefined)
   const refresh = (): void => { setRefreshKey(value => value + 1) }
   const closeDetail = (): void => {
     detailDirty.current = false
@@ -1005,9 +1053,16 @@ function Gantt({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: 
   const [zoom, setZoom] = useState<'month' | 'quarter' | 'year'>('quarter')
   const [showCompleted, setShowCompleted] = useState(false)
   const [anchor, setAnchor] = useState(() => Date.now())
+  const rows = useRef<HTMLDivElement>(null)
+  // The bars are a percentage of the middle grid column, so the "today" line has to be placed in
+  // that column's own pixels. Anchoring it to 50% of the whole component dropped it between the
+  // title column and the track.
+  const [todayLeft, setTodayLeft] = useState<number>()
   const days = zoom === 'month' ? 30 : zoom === 'quarter' ? 90 : 365
   const start = anchor - ((days / 2) * 86_400_000)
-  const point = (value: string | undefined, fallback: number): number => value === undefined ? fallback : new Date(`${value}T00:00:00`).getTime()
+  // Task dates are calendar days validated in UTC by the provider. Parsing them at local midnight
+  // shifted every bar a day west of UTC.
+  const point = (value: string | undefined, fallback: number): number => value === undefined ? fallback : new Date(`${value}T00:00:00Z`).getTime()
   const end = start + (days * 86_400_000)
   const dated = tasks.filter(task => {
     if (task.startDate === undefined && task.dueDate === undefined) return false
@@ -1018,14 +1073,29 @@ function Gantt({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: 
     const taskEnd = Math.max(point(task.dueDate, taskStart + 86_400_000), taskStart + 86_400_000)
     return taskEnd >= start && taskStart <= end
   })
-  return <div className="dsh-taskboard-gantt"><header><button type="button" onClick={() => { setAnchor(Date.now()) }}>{t.today}</button><select aria-label={t.ganttZoom} value={zoom} onChange={event => { setZoom(event.target.value as typeof zoom) }}><option value="month">{t.days30}</option><option value="quarter">{t.days90}</option><option value="year">{t.oneYear}</option></select><label><input type="checkbox" checked={showCompleted} onChange={event => { setShowCompleted(event.target.checked) }} />{t.showCompleted}</label></header><div className="dsh-taskboard-today" style={{ left: '50%' }} aria-hidden="true" />{dated.length === 0 ? <div className="dsh-taskboard-empty">{t.noDatedTasks}</div> : dated.map(task => {
+  useEffect(() => {
+    const container = rows.current
+    if (container === null) return
+    const measure = (): void => {
+      const track = container.querySelector('.dsh-taskboard-gantt-track')
+      if (track === null) { setTodayLeft(undefined); return }
+      const trackBox = track.getBoundingClientRect()
+      const containerBox = container.getBoundingClientRect()
+      setTodayLeft(trackBox.left - containerBox.left + (trackBox.width / 2))
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    return () => { observer.disconnect() }
+  }, [dated.length, zoom])
+  return <div className="dsh-taskboard-gantt"><header><button type="button" onClick={() => { setAnchor(Date.now()) }}>{t.today}</button><select aria-label={t.ganttZoom} value={zoom} onChange={event => { setZoom(event.target.value as typeof zoom) }}><option value="month">{t.days30}</option><option value="quarter">{t.days90}</option><option value="year">{t.oneYear}</option></select><label><input type="checkbox" checked={showCompleted} onChange={event => { setShowCompleted(event.target.checked) }} />{t.showCompleted}</label></header><div className="dsh-taskboard-gantt-rows" ref={rows}>{todayLeft !== undefined && <div className="dsh-taskboard-today" style={{ left: `${String(todayLeft)}px` }} aria-hidden="true" />}{dated.length === 0 ? <div className="dsh-taskboard-empty">{t.noDatedTasks}</div> : dated.map(task => {
     const taskStart = point(task.startDate, point(task.dueDate, anchor))
     const taskEnd = point(task.dueDate, taskStart + 86_400_000)
     const left = Math.max(0, Math.min(100, ((taskStart - start) / (days * 86_400_000)) * 100))
     const width = Math.max(1.5, Math.min(100 - left, ((Math.max(taskEnd, taskStart + 86_400_000) - taskStart) / (days * 86_400_000)) * 100))
     const repeat = task.recurrence === undefined ? '' : ` · ${task.recurrence.frequency}/${task.recurrence.interval}${task.recurrence.until === undefined ? '' : ` until ${task.recurrence.until}`}`
     return <button type="button" key={task.id} onClick={() => { open(task) }}><span>{task.identifier} · {task.title}</span><span className="dsh-taskboard-gantt-track"><i style={{ left: `${left}%`, width: `${width}%` }} /></span><small>{task.startDate ?? '…'} → {task.dueDate ?? '…'}{repeat}</small></button>
-  })}</div>
+  })}</div></div>
 }
 
 function WorkflowEditor({ project, workflows, catalog, capabilities, mutate }: {
@@ -1517,7 +1587,7 @@ ${NAV_STYLES}
 .dsh-taskboard-status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-status-dot[data-status=todo],.dsh-taskboard-status-dot[data-status=done]{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-status-dot[data-status=in_progress]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.dsh-taskboard-status-dot[data-status=in_review]{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-status-dot[data-status=blocked]{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-status-dot[data-status=canceled]{color:var(--dsw-alias-label-caption,#adb2b8)}.dsh-taskboard-status-dot[data-status=backlog]{color:var(--dsw-alias-label-tertiary,#81858c)}
 .dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more{width:100%;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;margin-top:4px;padding:6px 8px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more-label{font-size:12px;line-height:18px}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
 .dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-row-open{padding:0;border:0;background:transparent;color:var(--dsw-alias-link,#2563eb);font:inherit;text-align:left;cursor:pointer}.dsh-taskboard-row-open:hover{text-decoration:underline}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
-.dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-gantt{display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt-rows{position:relative;display:flex;flex-direction:column}.dsh-taskboard-gantt-rows>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt-rows>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:0;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-dialog-backdrop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.24));backdrop-filter:var(--dsw-mask-blur,blur(2px))}
 .dsh-taskboard-detail{width:min(1120px,100%);height:100%;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:0;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:24px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08));--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2,#d4d4d4);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2,#c4c4c4)}.dsh-taskboard-detail:focus{outline:none}
 .dsh-taskboard-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none;padding:20px 16px 12px 24px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-detail-heading{min-width:0;flex:1;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-detail-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.dsh-taskboard-detail-path{font-weight:500;color:var(--dsw-alias-label-primary,#0f1115)}.dsh-taskboard-detail-meta small{color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-detail input.dsh-taskboard-detail-title{width:100%;height:auto;min-height:36px;padding:4px 0;border:0;border-radius:0;background:transparent;font-size:20px;line-height:28px;font-weight:500}.dsh-taskboard-detail input.dsh-taskboard-detail-title:focus{border:0;box-shadow:none;outline:none}.dsh-taskboard-detail-author{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-detail-author strong{color:var(--dsw-alias-label-primary,#0f1115);font-weight:500}.dsh-taskboard-detail-toolbar{display:flex;align-items:center;gap:8px;flex:none}

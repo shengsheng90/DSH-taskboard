@@ -269,6 +269,8 @@ export interface TaskListFilter {
   readonly projectId: TaskboardProjectId
   readonly statuses?: readonly TaskStatus[]
   readonly includeArchived?: boolean
+  /** Return only archived rows, so a bounded snapshot can page live and archived work apart. */
+  readonly archivedOnly?: boolean
   readonly search?: string
   readonly limit?: number
   readonly offset?: number

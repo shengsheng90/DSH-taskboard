@@ -79,6 +79,26 @@ export interface TaskboardSnapshot {
 
 type RpcPayload = Record<string, unknown>
 
+/** Archived rows a snapshot carries for the dashboard's history section, budgeted separately from
+ *  the live board so one cannot starve the other. */
+const ARCHIVED_SNAPSHOT_LIMIT = 200
+
+interface TaskboardRpcFailure {
+  readonly code: string
+  readonly message: string
+  readonly details: Record<string, unknown>
+}
+
+/** Keep the domain code intact so a version conflict, a validation error, and a real fault stay
+ *  distinguishable. The Host's own `RpcError.code` union is closed and has no Taskboard member, so
+ *  only the Typert protocol below can report the code as a code. */
+function taskboardFailure(error: unknown): TaskboardRpcFailure {
+  if (error instanceof TaskboardError) {
+    return { code: error.code, message: error.message, details: error.details ?? {} }
+  }
+  return { code: 'internal', message: error instanceof Error ? error.message : String(error), details: {} }
+}
+
 function record(value: unknown, label: string): RpcPayload {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TaskboardError(`${label} must be an object`, 'TASK_INVALID_INPUT')
@@ -200,6 +220,7 @@ export class TaskboardService extends TypertRemoteService {
     readonly afterRevision: number
     readonly timer: ReturnType<typeof setTimeout>
     readonly resolve: (result: TaskboardChangeWatchResult) => void
+    readonly watcherId?: string
   }>()
   private lastRevision = 0
   private acceptingChangeWatches = true
@@ -315,18 +336,24 @@ export class TaskboardService extends TypertRemoteService {
     // the whole snapshot -- fall back to the first project so the page stays usable.
     const requested = projectId !== undefined && projects.some(project => project.id === projectId) ? projectId : undefined
     const selected = requested ?? projects[0]?.id
-    const filter = { includeArchived: true } as const
-    const tasks = selected === undefined
+    // Live and archived work are paged apart. Sharing one budget let a large archive push the
+    // board's own cards out of the snapshot and leave nothing but a truncation notice.
+    const live = selected === undefined
       ? []
-      : this.provider.listTasks({ projectId: selected, ...filter, limit: this.config.snapshotTaskLimit })
-    const taskTotal = selected === undefined ? 0 : this.provider.countTasks({ projectId: selected, ...filter })
+      : this.provider.listTasks({ projectId: selected, limit: this.config.snapshotTaskLimit })
+    const archived = selected === undefined
+      ? []
+      : this.provider.listTasks({ projectId: selected, archivedOnly: true, limit: ARCHIVED_SNAPSHOT_LIMIT })
+    const liveTotal = selected === undefined ? 0 : this.provider.countTasks({ projectId: selected })
+    const archivedTotal = selected === undefined ? 0 : this.provider.countTasks({ projectId: selected, archivedOnly: true })
+    const tasks = [...live, ...archived]
     return {
       schemaVersion: 1,
       globalRevision: this.provider.globalRevision(),
       projects,
       tasks,
-      taskTotal,
-      tasksTruncated: taskTotal > tasks.length,
+      taskTotal: liveTotal + archivedTotal,
+      tasksTruncated: live.length < liveTotal || archived.length < archivedTotal,
       workflows: selected === undefined ? [] : this.provider.listWorkflows(selected),
       automations: selected === undefined ? [] : this.provider.listAutomations(selected),
       automationRuns: selected === undefined ? [] : this.provider.listAutomationRuns(selected),
@@ -366,6 +393,7 @@ export class TaskboardService extends TypertRemoteService {
         const result = await this.watchChanges(
           nonNegativeInteger(input['afterRevision'], 'afterRevision'),
           integer(input['timeoutMs'], 'timeoutMs'),
+          input['watcherId'] === undefined ? undefined : string(input['watcherId'], 'watcherId'),
         )
         return { ok: true, valueJson: JSON.stringify(result) }
       } catch (error) {
@@ -374,20 +402,24 @@ export class TaskboardService extends TypertRemoteService {
       }
     }
     if (request.endpoint === 'automation.run-now') {
-      const result = await this.dispatchAutomationRunNow(payload)
-      if (!result.ok) return { ok: false, errorCode: result.error.code, errorMessage: result.error.message }
+      const result = await this.dispatchAutomationRunNowFailable(payload)
+      if (!result.ok) return { ok: false, errorCode: result.failure.code, errorMessage: result.failure.message }
       return { ok: true, valueJson: JSON.stringify(result.value ?? null) }
     }
-    const result = this.dispatchHumanRpc(request.endpoint, payload, human('human:web-client'))
-    if (!result.ok) return { ok: false, errorCode: result.error.code, errorMessage: result.error.message }
+    const result = this.dispatchHumanFailable(request.endpoint, payload, human('human:web-client'))
+    if (!result.ok) return { ok: false, errorCode: result.failure.code, errorMessage: result.failure.message }
     return { ok: true, valueJson: JSON.stringify(result.value ?? null) }
   }
 
-  /** Wait for a committed revision change without requiring a Harness event extension. */
-  watchChanges(afterRevision: number, timeoutMs: number): Promise<TaskboardChangeWatchResult> {
+  /** Wait for a committed revision change without requiring a Harness event extension.
+   *  `watcherId` identifies one long-poll loop. A client abort cannot reach the Host, so the
+   *  abandoned waiter used to hold its slot for the full timeout; a fresh watch from the same
+   *  watcher now settles the one it replaces. */
+  watchChanges(afterRevision: number, timeoutMs: number, watcherId?: string): Promise<TaskboardChangeWatchResult> {
     const boundedTimeout = Math.min(Math.max(timeoutMs, 1), this.config.maxChangeWatchMs)
     const current = this.provider.globalRevision()
     this.lastRevision = current
+    if (watcherId !== undefined) this.settleReplacedWatcher(watcherId, current)
     if (!this.acceptingChangeWatches || current !== afterRevision) {
       return Promise.resolve({ globalRevision: current, changed: current !== afterRevision })
     }
@@ -404,35 +436,54 @@ export class TaskboardService extends TypertRemoteService {
           resolve({ globalRevision, changed: globalRevision !== afterRevision })
         }, boundedTimeout),
         resolve,
+        ...(watcherId === undefined ? {} : { watcherId }),
       }
       this.changeWaiters.add(waiter)
     })
   }
 
-  /** Dispatch a loopback-authenticated direct UI intent. */
+  private settleReplacedWatcher(watcherId: string, globalRevision: number): void {
+    for (const waiter of [...this.changeWaiters]) {
+      if (waiter.watcherId !== watcherId) continue
+      this.changeWaiters.delete(waiter)
+      clearTimeout(waiter.timer)
+      waiter.resolve({ globalRevision, changed: false })
+    }
+  }
+
+  /** Dispatch a loopback-authenticated direct UI intent.
+   *  The Host error union cannot name a Taskboard code, so it rides in the message on this path. */
   dispatchHumanRpc(endpoint: string, payload: unknown, actor: HumanActor): RpcResult<unknown> {
+    const result = this.dispatchHumanFailable(endpoint, payload, actor)
+    if (result.ok) return { ok: true, value: result.value }
+    return { ok: false, error: { code: 'internal', message: `${result.failure.code}: ${result.failure.message}`, details: {} } }
+  }
+
+  private dispatchHumanFailable(
+    endpoint: string, payload: unknown, actor: HumanActor,
+  ): { ok: true; value: unknown } | { ok: false; failure: TaskboardRpcFailure } {
     try {
       const input = record(payload, 'RPC payload')
-      const value = this.dispatchHuman(endpoint, input, actor)
-      return { ok: true, value }
+      return { ok: true, value: this.dispatchHuman(endpoint, input, actor) }
     } catch (error) {
-      const message = error instanceof TaskboardError
-        ? `${error.code}: ${error.message}`
-        : error instanceof Error ? error.message : String(error)
-      return { ok: false, error: { code: 'internal', message, details: {} } }
+      return { ok: false, failure: taskboardFailure(error) }
     }
   }
 
   private async dispatchAutomationRunNow(payload: unknown): Promise<RpcResult<unknown>> {
+    const result = await this.dispatchAutomationRunNowFailable(payload)
+    if (result.ok) return { ok: true, value: result.value }
+    return { ok: false, error: { code: 'internal', message: `${result.failure.code}: ${result.failure.message}`, details: {} } }
+  }
+
+  private async dispatchAutomationRunNowFailable(
+    payload: unknown,
+  ): Promise<{ ok: true; value: unknown } | { ok: false; failure: TaskboardRpcFailure }> {
     try {
       const input = record(payload, 'RPC payload')
-      const value = await this.runAutomationNow(string(input['automationId'], 'automationId'))
-      return { ok: true, value }
+      return { ok: true, value: await this.runAutomationNow(string(input['automationId'], 'automationId')) }
     } catch (error) {
-      const message = error instanceof TaskboardError
-        ? `${error.code}: ${error.message}`
-        : error instanceof Error ? error.message : String(error)
-      return { ok: false, error: { code: 'internal', message, details: {} } }
+      return { ok: false, failure: taskboardFailure(error) }
     }
   }
 
@@ -457,6 +508,14 @@ export class TaskboardService extends TypertRemoteService {
         return this.provider.createTask(record(input['request'], 'request') as unknown as CreateTaskRequest, actor)
       case 'task.detail':
         return this.taskDetail(this.taskId(input))
+      case 'task.search':
+        // The board filters the snapshot in memory, which cannot see past its own limit.
+        return this.provider.listTasks({
+          projectId: ProjectId(string(input['projectId'], 'projectId')),
+          search: string(input['search'], 'search'),
+          includeArchived: true,
+          limit: this.config.snapshotTaskLimit,
+        })
       case 'task.update':
         return this.provider.updateTask(
           TaskId(string(input['taskId'], 'taskId')),

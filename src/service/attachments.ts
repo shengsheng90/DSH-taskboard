@@ -81,6 +81,14 @@ export class TaskboardAttachmentRoutes {
       this.reply(response, 404, { error: 'not found' })
       return
     }
+    // Check the method before spending the capability. Consuming first meant a stray GET on an
+    // upload URL, a preflight OPTIONS, or a retry with the wrong verb burned the single-use ticket
+    // and forced the client to mint a new one against a possibly newer task version.
+    const method = operation === 'upload' ? 'PUT' : 'GET'
+    if (request.method !== method) {
+      this.reply(response, 405, { error: `method must be ${method}` })
+      return
+    }
     const ticket = this.consume(token)
     if (ticket === undefined || ticket.kind !== operation) {
       this.reply(response, 404, { error: 'ticket is invalid or expired' })
@@ -100,10 +108,6 @@ export class TaskboardAttachmentRoutes {
   }
 
   private async upload(request: IncomingMessage, response: ServerResponse, ticket: UploadTicket): Promise<void> {
-    if (request.method !== 'PUT') {
-      this.reply(response, 405, { error: 'method must be PUT' })
-      return
-    }
     const declared = Number(request.headers['content-length'] ?? 0)
     const limit = this.provider.attachmentOptions.maxAttachmentBytes
     if (Number.isFinite(declared) && declared > limit) {
@@ -126,11 +130,7 @@ export class TaskboardAttachmentRoutes {
     this.reply(response, 201, created)
   }
 
-  private async download(request: IncomingMessage, response: ServerResponse, ticket: DownloadTicket): Promise<void> {
-    if (request.method !== 'GET') {
-      this.reply(response, 405, { error: 'method must be GET' })
-      return
-    }
+  private async download(_request: IncomingMessage, response: ServerResponse, ticket: DownloadTicket): Promise<void> {
     // Resolve and validate before writing the head, then stream: a 25MB attachment should not be
     // held in memory in full just to be handed to the socket.
     const opened = this.provider.openAttachment(ticket.attachmentId, ticket.disposition)

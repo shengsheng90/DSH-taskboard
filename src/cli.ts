@@ -75,6 +75,14 @@ function jsonOption<T>(options: ReadonlyMap<string, string>, name: string): T {
   }
 }
 
+/** A cast used to be the only gate here, so `--status done` reached the INSERT unchallenged. */
+function creationStatus(value: string): 'backlog' | 'todo' {
+  if (value !== 'backlog' && value !== 'todo') {
+    throw new TaskboardError(`task creation cannot start at ${value}`, 'TASK_INVALID_INPUT', { status: value })
+  }
+  return value
+}
+
 function human(options: ReadonlyMap<string, string>): HumanActor {
   return { kind: 'human', actorId: options.get('actor') ?? 'human:cli' }
 }
@@ -184,7 +192,7 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
             title: required(options, 'title'),
             creator: options.get('creator') ?? actor.actorId,
             ...(options.has('description') ? { description: required(options, 'description') } : {}),
-            ...(options.has('status') ? { status: required(options, 'status') as 'backlog' | 'todo' } : {}),
+            ...(options.has('status') ? { status: creationStatus(required(options, 'status')) } : {}),
           }
       value = provider.createTask(request, actor)
     } else if (group === 'task' && command === 'update') {

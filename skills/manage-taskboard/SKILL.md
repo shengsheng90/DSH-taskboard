@@ -21,7 +21,7 @@ Keep every write version-linear: after any successful comment, relation, block, 
 
 ## Handle exceptional outcomes
 
-- Call `taskboard_block` only with a concrete reason when work cannot proceed. Include the missing dependency, decision, permission, or external condition.
+- Call `taskboard_block` only on the in-progress task you hold the claim for, and only with a concrete reason when work cannot proceed. Include the missing dependency, decision, permission, or external condition. A `todo` you have not claimed is not yours to block: report the obstacle in a comment and leave the column to a human.
 - Call `taskboard_release_claim` when intentionally abandoning owned work. Explain what remains and leave useful progress in a comment first when possible.
 - Use `taskboard_relate` only after reading both tasks. Keep relations within one project and do not create parent cycles.
 - Never call or emulate acceptance. Only a human may accept `in_review` as `done`, return it for rework, approve backlog work, archive it, or permanently delete it.

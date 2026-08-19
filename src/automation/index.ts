@@ -1,5 +1,5 @@
 import { TaskboardError } from '../domain/index.js'
-import type { AutomationRule, TaskboardTask } from '../domain/index.js'
+import type { AutomationDecision, AutomationRule, AutomationState, TaskboardTask } from '../domain/index.js'
 import type { TaskboardService } from '../service/index.js'
 
 export type QuotaState = 'available' | 'uncertain'
@@ -13,6 +13,12 @@ export interface TaskboardQuotaPolicy {
 }
 
 const DEFAULT_QUOTA: TaskboardQuotaPolicy = { state: () => Promise.resolve('available') }
+
+/** Claim failures that only mean "this candidate is taken", so the drain must try the next one.
+ *  Treating them as fatal used to abandon the rest of the queue for the whole round. */
+const CONTENDED_CLAIM_CODES: ReadonlySet<string> = new Set([
+  'TASK_INVALID_TRANSITION', 'TASK_ALREADY_CLAIMED', 'TASK_STALE_VERSION', 'TASK_DEVELOPMENT_CONTEXT_BUSY',
+])
 
 /** Host-owned durable scheduler that starts work but never steals an existing claim. */
 export class TaskboardAutomationCoordinator {
@@ -114,10 +120,32 @@ export class TaskboardAutomationCoordinator {
     this.draining.add(ruleId)
     this.cancelTimer(ruleId)
     const coordinatorActive = this.running
+    let failure: unknown
     try {
       await this.drain(ruleId, coordinatorActive)
+    } catch (error) {
+      failure = error
     } finally {
       this.draining.delete(ruleId)
+    }
+    // The timer was cancelled on entry, so a thrown drain used to leave the rule with no timer at
+    // all: it stopped being scheduled until an unrelated rescan or a Host restart. Record the
+    // failure and re-arm instead.
+    if (failure !== undefined) this.reschedule(ruleId, failure)
+  }
+
+  private reschedule(ruleId: string, failure: unknown): void {
+    if (!this.running) return
+    try {
+      const latest = this.taskboard.provider.getAutomation(ruleId)
+      if (latest.state !== 'enabled') return
+      this.schedule(this.record(ruleId, {
+        kind: 'error',
+        message: failure instanceof Error ? failure.message : String(failure),
+        at: Date.now(),
+      }, Date.now() + latest.config.intervalMs))
+    } catch (_ruleUnavailable) {
+      // The rule was deleted or disabled while draining; there is nothing left to schedule.
     }
   }
 
@@ -134,7 +162,7 @@ export class TaskboardAutomationCoordinator {
       if (!preserve && rule.state !== 'enabled') return
       const quota = await this.quota.state(rule)
       if (quota === 'uncertain' && rule.config.quotaPolicy === 'pause-on-uncertain') {
-        rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+        rule = this.record(ruleId, {
           kind: 'quota-paused', message: 'quota state is uncertain; no new claims started', at: Date.now(),
         }, preserve ? kept : undefined, preserve ? undefined : 'paused')
         if (!preserve) this.refresh(rule)
@@ -144,7 +172,7 @@ export class TaskboardAutomationCoordinator {
       const slots = this.availableSlots(rule)
       if (slots === 0) {
         if (inFlight.size === 0) {
-          rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+          rule = this.record(ruleId, {
             kind: 'empty', message: 'worker concurrency is currently full', at: Date.now(),
           }, preserve ? kept : Date.now() + rule.config.intervalMs)
           if (!preserve) this.schedule(rule)
@@ -160,7 +188,7 @@ export class TaskboardAutomationCoordinator {
           continue
         }
         const pause = !preserve && rule.config.autoPauseOnEmpty
-        rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+        rule = this.record(ruleId, {
           kind: 'empty', message: 'no eligible todo tasks', at: Date.now(),
         }, preserve ? kept : (pause ? undefined : Date.now() + rule.config.intervalMs), pause ? 'paused' : preserve ? undefined : 'enabled')
         if (!preserve) this.schedule(rule)
@@ -168,16 +196,21 @@ export class TaskboardAutomationCoordinator {
       }
       let started = 0
       let dependencyBlocked = 0
+      let contended = 0
       for (const task of candidates) {
         if (started >= slots) break
         try {
           this.startWorker(rule, task)
           started += 1
-          rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+          rule = this.record(ruleId, {
             kind: 'claimed', taskId: task.id, message: `worker started for ${task.identifier}`, at: Date.now(),
           }, preserve ? kept : undefined)
         } catch (error) {
-          if (error instanceof TaskboardError && error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
+          if (!(error instanceof TaskboardError)) throw error
+          // Losing a candidate to a dependency, to another owner, or to a busy development context
+          // says nothing about the rest of the queue. Only a genuine fault ends the round.
+          if (error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
+          else if (CONTENDED_CLAIM_CODES.has(error.code)) contended += 1
           else throw error
         }
       }
@@ -186,9 +219,11 @@ export class TaskboardAutomationCoordinator {
         await Promise.race(inFlight)
         continue
       }
-      rule = this.taskboard.provider.recordAutomationDecision(rule.id, rule.version, {
+      rule = this.record(ruleId, {
         kind: dependencyBlocked > 0 ? 'dependency-blocked' : 'empty',
-        message: dependencyBlocked > 0 ? 'todo tasks are waiting for dependencies' : 'no worker started',
+        message: dependencyBlocked > 0
+          ? 'todo tasks are waiting for dependencies'
+          : contended > 0 ? 'every eligible todo is already owned elsewhere' : 'no worker started',
         at: Date.now(),
       }, preserve ? kept : Date.now() + rule.config.intervalMs)
       if (!preserve) this.schedule(rule)
@@ -226,12 +261,17 @@ export class TaskboardAutomationCoordinator {
       throw error
     }
     const ruleTracking = this.ruleInFlight(ruleId)
-    const tracked = run.catch(async (error: unknown) => {
-      const latest = this.taskboard.provider.getAutomation(rule.id)
-      if (latest.state === 'enabled') {
-        this.taskboard.provider.recordAutomationDecision(latest.id, latest.version, {
-          kind: 'error', taskId: task.id, message: error instanceof Error ? error.message : String(error), at: Date.now(),
-        }, latest.nextEligibleAt)
+    const tracked = run.catch((error: unknown) => {
+      try {
+        const latest = this.taskboard.provider.getAutomation(rule.id)
+        if (latest.state === 'enabled') {
+          this.record(ruleId, {
+            kind: 'error', taskId: task.id, message: error instanceof Error ? error.message : String(error), at: Date.now(),
+          }, latest.nextEligibleAt)
+        }
+      } catch (_bookkeepingFailed) {
+        // `drain()` awaits this promise. Letting the error log's own failure reject it turned one
+        // worker launch failure into a dead round for the whole rule.
       }
     }).finally(() => {
       this.inFlight.delete(tracked)
@@ -242,6 +282,19 @@ export class TaskboardAutomationCoordinator {
     })
     this.inFlight.add(tracked)
     ruleTracking.add(tracked)
+  }
+
+  /** Record a decision against the row's current version.
+   *  Workers settle while `drain()` awaits, so the version it read before an await is routinely
+   *  stale by the time it writes; a compare-and-set on that stale value threw out of the round. */
+  private record(
+    ruleId: string,
+    decision: AutomationDecision,
+    nextEligibleAt: number | undefined,
+    state?: AutomationState,
+  ): AutomationRule {
+    const latest = this.taskboard.provider.getAutomation(ruleId)
+    return this.taskboard.provider.recordAutomationDecision(latest.id, latest.version, decision, nextEligibleAt, state)
   }
 
   private decrement(projectId: string): void {

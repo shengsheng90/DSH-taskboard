@@ -538,3 +538,141 @@ test('countTasks reports totals independently of the requested page', () => {
     provider.close()
   }
 })
+
+test('task creation refuses a status outside the reviewable entry points', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    // The table CHECK accepts all seven statuses, so nothing but this guard stops an RPC or CLI
+    // payload from opening a task straight at done and skipping the human-owned lifecycle.
+    for (const status of ['done', 'in_progress', 'in_review', 'blocked', 'canceled'] as const) {
+      assert.throws(
+        () => provider.createTask({
+          projectId: project.id, title: 'Smuggled', creator: human.actorId, status: status as 'todo',
+        }, human),
+        (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_INVALID_INPUT',
+        status,
+      )
+    }
+    assert.equal(provider.createTask({ projectId: project.id, title: 'Backlog', creator: human.actorId }, human).status, 'backlog')
+    assert.equal(provider.createTask({ projectId: project.id, title: 'Todo', creator: human.actorId, status: 'todo' }, human).status, 'todo')
+    assert.equal(provider.countTasks({ projectId: project.id }), 2)
+  } finally {
+    provider.close()
+  }
+})
+
+test('an Agent may only block the in-progress task it owns', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    let unclaimed = provider.createTask({ projectId: project.id, title: 'Nobody owns this', creator: human.actorId }, human)
+    unclaimed = provider.approve(unclaimed.id, unclaimed.version, human)
+    // A todo column has no owner, so this used to let any Session with the tool stop work it had
+    // never claimed.
+    assert.throws(
+      () => provider.block(unclaimed.id, unclaimed.version, 'I decided this is blocked', agent),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_INVALID_TRANSITION',
+    )
+    assert.equal(provider.getTask(unclaimed.id).status, 'todo')
+
+    const claimed = provider.claim(unclaimed.id, {
+      expectedVersion: unclaimed.version, sessionId: agent.sessionId, agentId: agent.agentId,
+    }, agent)
+    assert.throws(
+      () => provider.block(claimed.task.id, claimed.task.version, 'not my claim', otherAgent),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_FOREIGN_CLAIM',
+    )
+    const blocked = provider.block(claimed.task.id, claimed.task.version, 'waiting on an upstream decision', agent)
+    assert.equal(blocked.status, 'blocked')
+
+    // A human still owns the todo column.
+    let humanTask = provider.createTask({ projectId: project.id, title: 'Human blocks this', creator: human.actorId }, human)
+    humanTask = provider.approve(humanTask.id, humanTask.version, human)
+    assert.equal(provider.block(humanTask.id, humanTask.version, 'blocked by policy', human).status, 'blocked')
+  } finally {
+    provider.close()
+  }
+})
+
+test('an exclusive development context admits one owner across every entry point', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    const context = { kind: 'branch', branch: 'feature/exclusive' } as const
+    let owned = provider.createTask({
+      projectId: project.id, title: 'Owned', creator: human.actorId, developmentContext: context,
+    }, human)
+    owned = provider.approve(owned.id, owned.version, human)
+    provider.claim(owned.id, { expectedVersion: owned.version, sessionId: agent.sessionId, agentId: agent.agentId }, agent)
+
+    let rival = provider.createTask({
+      projectId: project.id, title: 'Rival', creator: human.actorId, developmentContext: context,
+    }, human)
+    rival = provider.approve(rival.id, rival.version, human)
+    // A board drag creates no claim, so nothing used to stop a card from entering a branch an
+    // Agent was already working in.
+    assert.throws(
+      () => provider.moveStatus(rival.id, rival.version, 'in_progress', human),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_DEVELOPMENT_CONTEXT_BUSY',
+    )
+    assert.equal(provider.getTask(rival.id).status, 'todo')
+    assert.throws(
+      () => provider.claim(rival.id, { expectedVersion: rival.version, sessionId: 'session-3', agentId: 'agent-3' }, {
+        kind: 'agent', actorId: 'agent-3', sessionId: 'session-3', agentId: 'agent-3',
+      }),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_DEVELOPMENT_CONTEXT_BUSY',
+    )
+
+    // The reverse order is now covered too: an owner-less in_progress card holds the context.
+    const released = provider.getTask(owned.id)
+    provider.releaseClaim(released.id, released.version, 'handing back', agent)
+    const moved = provider.moveStatus(rival.id, provider.getTask(rival.id).version, 'in_progress', human)
+    assert.equal(moved.status, 'in_progress')
+    assert.equal(provider.getTaskDetail(moved.id).activeClaim, undefined)
+    assert.throws(
+      () => provider.claim(released.id, { expectedVersion: provider.getTask(released.id).version, sessionId: 'session-4', agentId: 'agent-4' }, {
+        kind: 'agent', actorId: 'agent-4', sessionId: 'session-4', agentId: 'agent-4',
+      }),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_DEVELOPMENT_CONTEXT_BUSY',
+    )
+  } finally {
+    provider.close()
+  }
+})
+
+test('rework and resume into in-progress refuse a busy development context', () => {
+  const provider = memoryProvider()
+  try {
+    const project = provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    const context = { kind: 'branch', branch: 'feature/rework' } as const
+    let submitted = provider.createTask({
+      projectId: project.id, title: 'In review', creator: human.actorId, developmentContext: context,
+    }, human)
+    submitted = provider.approve(submitted.id, submitted.version, human)
+    const claim = provider.claim(submitted.id, {
+      expectedVersion: submitted.version, sessionId: agent.sessionId, agentId: agent.agentId,
+    }, agent)
+    const inReview = provider.submitReview(claim.task.id, claim.task.version, 'Completed', 'Ready', agent)
+
+    // A second task takes the branch while the first sits in review.
+    let rival = provider.createTask({
+      projectId: project.id, title: 'Rival', creator: human.actorId, developmentContext: context,
+    }, human)
+    rival = provider.approve(rival.id, rival.version, human)
+    provider.claim(rival.id, { expectedVersion: rival.version, sessionId: otherAgent.sessionId, agentId: otherAgent.agentId }, otherAgent)
+
+    // `insertFreshClaim` only ever checked this task's own claims, never the shared context.
+    assert.throws(
+      () => provider.returnForRework(inReview.id, inReview.version, 'in_progress', 'please redo the edge case', human, {
+        sessionId: 'session-5', agentId: 'agent-5',
+      }),
+      (error: unknown) => error instanceof TaskboardError && error.code === 'TASK_DEVELOPMENT_CONTEXT_BUSY',
+    )
+    assert.equal(provider.getTask(inReview.id).status, 'in_review')
+    const returned = provider.returnForRework(inReview.id, inReview.version, 'todo', 'please redo the edge case', human)
+    assert.equal(returned.status, 'todo')
+  } finally {
+    provider.close()
+  }
+})
