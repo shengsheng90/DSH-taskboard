@@ -1,6 +1,7 @@
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TaskboardSnapshot } from '../service/index.js'
+import { TASK_STATUSES } from '../domain/index.js'
 import type {
   TaskStatus, TaskboardChangeWatchResult, TaskboardRemoteMutationRequest, TaskboardRemoteMutationResult, TaskDetail,
 } from '../domain/index.js'
@@ -120,6 +121,49 @@ export function classifyRevisionChange(previous: number | undefined, next: numbe
   if (next === previous) return 'same'
   if (next < previous) return 'reset'
   return next === previous + 1 ? 'next' : 'gap'
+}
+
+export type TaskListSortKey = 'identifier' | 'title' | 'status' | 'priority' | 'dueDate'
+
+const PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 }
+const STATUS_RANK = new Map(TASK_STATUSES.map((status, index) => [status as string, index]))
+
+/** Rank one task for the list view. Priority and status are enums with a meaningful order, so
+ *  comparing their raw strings put "high" before "low" before "urgent" -- alphabetical noise. */
+function sortValue(task: TaskListSortable, key: TaskListSortKey): string | number {
+  if (key === 'priority') return PRIORITY_RANK[task.priority] ?? Number.MAX_SAFE_INTEGER
+  if (key === 'status') return STATUS_RANK.get(task.status) ?? Number.MAX_SAFE_INTEGER
+  // Undated tasks sort last in both directions rather than leading the ascending page.
+  if (key === 'dueDate') return task.dueDate ?? '\uffff'
+  return key === 'title' ? task.title : task.identifier
+}
+
+export interface TaskListSortable {
+  readonly identifier: string
+  readonly title: string
+  readonly status: string
+  readonly priority: string
+  readonly dueDate?: string
+}
+
+/** Order the list view by one column, in the requested direction. */
+export function sortTaskList<T extends TaskListSortable>(
+  tasks: readonly T[],
+  key: TaskListSortKey,
+  direction: 'asc' | 'desc' = 'asc',
+): T[] {
+  const sign = direction === 'asc' ? 1 : -1
+  return [...tasks].sort((left, right) => {
+    const a = sortValue(left, key)
+    const b = sortValue(right, key)
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (a !== b) return (a - b) * sign
+    } else if (a !== b) {
+      return String(a).localeCompare(String(b), undefined, { numeric: true }) * sign
+    }
+    // Stable, direction-independent tiebreak so equal rows never shuffle between renders.
+    return left.identifier.localeCompare(right.identifier, undefined, { numeric: true })
+  })
 }
 
 export type BoardDropIntent =

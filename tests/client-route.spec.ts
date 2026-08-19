@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -332,4 +332,32 @@ test('client reconnect subscription uses the public Host-description generation 
   assert.equal(invalidations, 2)
   unsubscribe()
   assert.equal(disposed, 1)
+})
+
+test('list view sorts enums by their real order, not alphabetically', () => {
+  const task = (identifier: string, priority: string, status: string, dueDate?: string) =>
+    ({ identifier, title: identifier, priority, status, ...(dueDate === undefined ? {} : { dueDate }) })
+  const tasks = [
+    task('DSH-1', 'none', 'done'),
+    task('DSH-2', 'urgent', 'backlog'),
+    task('DSH-3', 'low', 'in_review'),
+    task('DSH-4', 'high', 'todo'),
+    task('DSH-5', 'medium', 'in_progress'),
+  ]
+
+  // Alphabetically this was high, low, medium, none, urgent -- meaningless as a priority order.
+  assert.deepEqual(sortTaskList(tasks, 'priority').map(item => item.priority), ['urgent', 'high', 'medium', 'low', 'none'])
+  assert.deepEqual(sortTaskList(tasks, 'priority', 'desc').map(item => item.priority), ['none', 'low', 'medium', 'high', 'urgent'])
+  assert.deepEqual(
+    sortTaskList(tasks, 'status').map(item => item.status),
+    ['backlog', 'todo', 'in_progress', 'in_review', 'done'],
+  )
+
+  // Identifiers compare numerically, so DSH-10 follows DSH-9.
+  const many = [task('DSH-10', 'none', 'todo'), task('DSH-9', 'none', 'todo'), task('DSH-1', 'none', 'todo')]
+  assert.deepEqual(sortTaskList(many, 'identifier').map(item => item.identifier), ['DSH-1', 'DSH-9', 'DSH-10'])
+
+  // Undated tasks sort last ascending rather than leading the page.
+  const dated = [task('DSH-1', 'none', 'todo'), task('DSH-2', 'none', 'todo', '2026-01-05'), task('DSH-3', 'none', 'todo', '2026-01-01')]
+  assert.deepEqual(sortTaskList(dated, 'dueDate').map(item => item.identifier), ['DSH-3', 'DSH-2', 'DSH-1'])
 })

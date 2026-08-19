@@ -15,7 +15,7 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, TaskboardClientController, tasksForLabel } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, TaskboardClientController, tasksForLabel, type TaskListSortKey } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
@@ -248,14 +248,24 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [logOpen, setLogOpen] = useState(false)
   const [undo, setUndo] = useState<{ endpoint: string; payload: Record<string, unknown> }>()
+  /** Newest globalRevision already rendered; the change poll uses it to skip redundant refetches. */
+  const loadedRevision = useRef(0)
+  /** Serializes writes so a double-click cannot duplicate a task or race the expected version. */
+  const inFlight = useRef(false)
+  /** Set by the open task dialog; title/description/meta edits live in local state until Save. */
+  const detailDirty = useRef(false)
+  const [discardPrompt, setDiscardPrompt] = useState(false)
   const t = useStrings()
 
+  // route.view is deliberately absent: every view renders the same snapshot, so switching tabs
+  // must not refetch it.
   useEffect(() => {
     if (!route.open) return
     const abort = new AbortController()
     setBusy(true)
     controller.snapshot(route.projectId, abort.signal).then(next => {
       controller.recordSnapshotRevision(next.globalRevision)
+      loadedRevision.current = next.globalRevision
       setSnapshot(next)
       setError(undefined)
       if (route.projectId === undefined && next.projects[0] !== undefined) controller.select(next.projects[0].id, route.view)
@@ -263,7 +273,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       if (!abort.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause))
     }).finally(() => { if (!abort.signal.aborted) setBusy(false) })
     return () => { abort.abort() }
-  }, [controller, refreshKey, route.open, route.projectId, route.view])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, refreshKey, route.open, route.projectId])
 
   useEffect(() => {
     if (!route.open || route.taskId === undefined) { setDetail(undefined); return }
@@ -296,7 +307,9 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         const result = await controller.watchChanges(revision, abort.signal)
         if (abort.signal.aborted) return
         if (result.changed || result.globalRevision !== revision) {
-          setRefreshKey(value => value + 1)
+          // A local mutation already refreshes on its own. Without this guard its committed
+          // revision wakes the poll too and the same snapshot is fetched a second time.
+          if (result.globalRevision > loadedRevision.current) setRefreshKey(value => value + 1)
           return
         }
         revision = result.globalRevision
@@ -312,6 +325,11 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
     if (!route.open) return
     const onKey = (event: globalThis.KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      if (discardPrompt) {
+        event.preventDefault()
+        setDiscardPrompt(false)
+        return
+      }
       if (logOpen) {
         event.preventDefault()
         setLogOpen(false)
@@ -319,14 +337,16 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       }
       if (route.taskId !== undefined) {
         event.preventDefault()
-        controller.select(route.projectId, route.view)
+        // Escape used to discard unsaved title/description edits without a word.
+        if (detailDirty.current) setDiscardPrompt(true)
+        else controller.select(route.projectId, route.view)
         return
       }
       controller.close()
     }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey) }
-  }, [controller, logOpen, route.open, route.projectId, route.taskId, route.view])
+  }, [controller, discardPrompt, logOpen, route.open, route.projectId, route.taskId, route.view])
 
   if (!route.open) return null
   const selected = snapshot?.projects.find(project => project.id === route.projectId) ?? snapshot?.projects[0]
@@ -339,7 +359,21 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   })
   const selectedTask = tasks.find(task => task.id === route.taskId)
   const refresh = (): void => { setRefreshKey(value => value + 1) }
+  const closeDetail = (): void => {
+    detailDirty.current = false
+    setDiscardPrompt(false)
+    controller.select(selected?.id, route.view)
+  }
+  /** Every path that closes the task dialog goes through here so unsaved edits are never dropped. */
+  const requestCloseDetail = (): void => {
+    if (detailDirty.current) setDiscardPrompt(true)
+    else closeDetail()
+  }
   const mutate = async (endpoint: string, payload: Record<string, unknown>): Promise<unknown> => {
+    // One in-flight write at a time. Without this a double-click either creates a duplicate task
+    // (task.create carries no expected version) or fails the second attempt on a stale version.
+    if (inFlight.current) return undefined
+    inFlight.current = true
     setBusy(true)
     try {
       const prior = endpoint === 'task.update' && typeof payload['taskId'] === 'string'
@@ -373,14 +407,22 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
       if (message.includes('TASK_STALE_VERSION')) refresh()
       return undefined
     }
-    finally { setBusy(false) }
+    finally { inFlight.current = false; setBusy(false) }
   }
   const performUndo = async (): Promise<void> => {
-    if (undo === undefined) return
+    if (undo === undefined || inFlight.current) return
+    inFlight.current = true
     setBusy(true)
-    try { await controller.mutate(undo.endpoint, undo.payload); setUndo(undefined); setError(undefined); refresh() }
+    try {
+      // Re-read the version at click time: any write since the undo was recorded moved it on, and
+      // replaying the captured one only produced a stale-version error.
+      const current = tasks.find(task => task.id === undo.payload['taskId'])
+      const payload = current === undefined ? undo.payload : { ...undo.payload, expectedVersion: current.version }
+      await controller.mutate(undo.endpoint, payload)
+      setUndo(undefined); setError(undefined); refresh()
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { setBusy(false) }
+    finally { inFlight.current = false; setBusy(false) }
   }
 
   return (
@@ -430,7 +472,17 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           </main>
         </div>}
       {logOpen && <AutomationLogDialog runs={snapshot?.automationRuns ?? []} tasks={tasks} close={() => { setLogOpen(false) }} />}
-      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={() => { controller.select(selected?.id, route.view) }} />}
+      {discardPrompt && <div className="dsh-taskboard-dialog-backdrop" onClick={event => { if (event.target === event.currentTarget) setDiscardPrompt(false) }}>
+        <div className="dsh-taskboard-discard-dialog" role="alertdialog" aria-modal="true" aria-label={t.unsavedChanges}>
+          <h2>{t.unsavedChanges}</h2>
+          <p>{t.unsavedBody}</p>
+          <div>
+            <button type="button" autoFocus onClick={() => { setDiscardPrompt(false) }}>{t.keepEditing}</button>
+            <button type="button" onClick={closeDetail}>{t.discardChanges}</button>
+          </div>
+        </div>
+      </div>}
+      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
     </div>
   )
 }
@@ -830,10 +882,18 @@ function TaskCard({ task, open, drag }: {
 
 function ListView({ tasks, open }: { tasks: readonly TaskboardTask[]; open: (task: TaskboardTask) => void }) {
   const t = useStrings()
-  const [sort, setSort] = useState<'identifier' | 'title' | 'status' | 'priority' | 'dueDate'>('identifier')
-  const ordered = [...tasks].sort((left, right) => String(left[sort] ?? '').localeCompare(String(right[sort] ?? ''), undefined, { numeric: true }))
-  const heading = (key: typeof sort, label: string) => <button type="button" onClick={() => { setSort(key) }}>{label}{sort === key ? ' ↑' : ''}</button>
-  return <div className="dsh-taskboard-table-wrap"><table><thead><tr><th>{heading('identifier', 'ID')}</th><th>{heading('title', t.title)}</th><th>{heading('status', t.status)}</th><th>{heading('priority', t.priority)}</th><th>{heading('dueDate', t.due)}</th></tr></thead><tbody>{ordered.map(task => <tr key={task.id} tabIndex={0} onClick={() => { open(task) }} onKeyDown={event => { if (event.key === 'Enter') open(task) }}><td>{task.identifier}</td><td>{task.title}</td><td>{t[task.status]}</td><td>{priorityLabel(t, task.priority)}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
+  const [sort, setSort] = useState<TaskListSortKey>('identifier')
+  const [direction, setDirection] = useState<'asc' | 'desc'>('asc')
+  const ordered = useMemo(() => sortTaskList(tasks, sort, direction), [tasks, sort, direction])
+  const heading = (key: TaskListSortKey, label: string) => (
+    <th aria-sort={sort === key ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => {
+        if (sort === key) setDirection(current => current === 'asc' ? 'desc' : 'asc')
+        else { setSort(key); setDirection('asc') }
+      }}>{label}{sort === key ? (direction === 'asc' ? ' ↑' : ' ↓') : ''}</button>
+    </th>
+  )
+  return <div className="dsh-taskboard-table-wrap"><table><thead><tr>{heading('identifier', 'ID')}{heading('title', t.title)}{heading('status', t.status)}{heading('priority', t.priority)}{heading('dueDate', t.due)}</tr></thead><tbody>{ordered.map(task => <tr key={task.id}><td><button type="button" className="dsh-taskboard-row-open" onClick={() => { open(task) }}>{task.identifier}</button></td><td>{task.title}</td><td>{t[task.status]}</td><td>{priorityLabel(t, task.priority)}</td><td>{task.dueDate ?? '—'}</td></tr>)}</tbody></table></div>
 }
 
 function LabelsView({ project, tasks, open, mutate }: {
@@ -1004,15 +1064,15 @@ function WorkflowEditor({ project, workflows, catalog, capabilities, mutate }: {
       id: `${kind}-${Date.now()}`, kind, execution: entry.execution, config: { target },
     }))
   }
-  return <div className="dsh-taskboard-workflows"><aside><form className="dsh-taskboard-workflow-create" onSubmit={create}><input aria-label="Workflow name" value={newWorkflowName} onChange={event => { setNewWorkflowName(event.target.value) }} placeholder="Workflow name" /><button type="submit" disabled={project === undefined || newWorkflowName.trim() === ''}>＋ {t.addWorkflow}</button></form>{workflows.map(item => <button type="button" className={item.id === selected?.id ? 'active' : ''} key={item.id} onClick={() => { setSelectedId(item.id) }}><strong>{item.name}</strong><small>v{item.version}</small></button>)}</aside><section>{selected === undefined || document === undefined ? <div className="dsh-taskboard-empty">{t.workflowNote}</div> : <><header><input aria-label="Saved workflow name" value={name} onChange={event => { setName(event.target.value) }} /><select aria-label="Node kind" value={nodeKind} onChange={event => { setNodeKind(event.target.value) }}>{stepEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" onClick={addStep}>＋ {t.addStep}</button><input aria-label="New tab name" value={newTabName} onChange={event => { setNewTabName(event.target.value) }} placeholder="Tab name" /><select aria-label="Trigger kind" value={triggerKind} onChange={event => { setTriggerKind(event.target.value) }}>{triggerEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" disabled={newTabName.trim() === ''} onClick={addTab}>＋ Tab</button><button type="button" onClick={() => { void mutate('workflow.update', { workflowId: selected.id, expectedVersion: selected.version, name, document }) }}>{t.save}</button><button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>×</button>{confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>Delete workflow?</span><button type="button" onClick={() => { void mutate('workflow.delete', { workflowId: selected.id, expectedVersion: selected.version }); setConfirmDelete(false) }}>Delete</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}</header><div className="dsh-taskboard-workflow-tabs">{document.tabs.map(tab => <article key={tab.id}><header><h3>{tab.name}</h3><button type="button" disabled={document.tabs.length <= 1} onClick={() => { setDocument(removeWorkflowTab(document, tab.id)) }}>× Tab</button></header><WorkflowNodeCard node={tab.trigger} tabId={tab.id} edit={editNode} trigger /><div className="dsh-taskboard-flow-line" />{tab.steps.map(node => <WorkflowNodeCard key={node.id} node={node} tabId={tab.id} edit={editNode} />)}</article>)}</div><footer>{catalog.map(item => <span key={item.kind} data-execution={item.execution}>{item.kind} · {item.execution === 'executable' ? t.executable : t.designOnly}</span>)}</footer><section className="dsh-taskboard-capabilities"><h3>Installed capabilities</h3><small>Skill discovery: {capabilities?.skillDiscoveryComplete === true ? 'complete' : 'refreshing/incomplete'}</small><div>{capabilities?.skills.map(skill => <button type="button" key={`skill-${skill.name}`} title={skill.description} onClick={() => { addCapability('skill', skill.name) }}>＋ Skill · {skill.name}</button>)}</div><div>{capabilities?.mcpTools.map(tool => <button type="button" key={`mcp-${tool.name}`} title={tool.description} onClick={() => { addCapability('mcp', tool.name) }}>＋ MCP · {tool.name}</button>)}</div></section></>}</section></div>
+  return <div className="dsh-taskboard-workflows"><aside><form className="dsh-taskboard-workflow-create" onSubmit={create}><input aria-label={t.workflowName} value={newWorkflowName} onChange={event => { setNewWorkflowName(event.target.value) }} placeholder={t.workflowName} /><button type="submit" disabled={project === undefined || newWorkflowName.trim() === ''}>＋ {t.addWorkflow}</button></form>{workflows.map(item => <button type="button" className={item.id === selected?.id ? 'active' : ''} key={item.id} onClick={() => { setSelectedId(item.id) }}><strong>{item.name}</strong><small>v{item.version}</small></button>)}</aside><section>{selected === undefined || document === undefined ? <div className="dsh-taskboard-empty">{t.workflowNote}</div> : <><header><input aria-label={t.workflowName} value={name} onChange={event => { setName(event.target.value) }} /><select aria-label={t.nodeKind} value={nodeKind} onChange={event => { setNodeKind(event.target.value) }}>{stepEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" onClick={addStep}>＋ {t.addStep}</button><input aria-label={t.newTabName} value={newTabName} onChange={event => { setNewTabName(event.target.value) }} placeholder={t.newTabName} /><select aria-label={t.triggerKind} value={triggerKind} onChange={event => { setTriggerKind(event.target.value) }}>{triggerEntries.map(item => <option key={item.kind} value={item.kind}>{item.kind}</option>)}</select><button type="button" disabled={newTabName.trim() === ''} onClick={addTab}>＋ {t.tab}</button><button type="button" onClick={() => { void mutate('workflow.update', { workflowId: selected.id, expectedVersion: selected.version, name, document }) }}>{t.save}</button><button type="button" aria-expanded={confirmDelete} onClick={() => { setConfirmDelete(value => !value) }}>×</button>{confirmDelete && <div className="dsh-taskboard-confirm" role="alert"><span>{t.deleteWorkflow}?</span><button type="button" onClick={() => { void mutate('workflow.delete', { workflowId: selected.id, expectedVersion: selected.version }); setConfirmDelete(false) }}>{t.delete}</button><button type="button" onClick={() => { setConfirmDelete(false) }}>{t.close}</button></div>}</header><div className="dsh-taskboard-workflow-tabs">{document.tabs.map(tab => <article key={tab.id}><header><h3>{tab.name}</h3><button type="button" disabled={document.tabs.length <= 1} onClick={() => { setDocument(removeWorkflowTab(document, tab.id)) }}>× {t.tab}</button></header><WorkflowNodeCard node={tab.trigger} tabId={tab.id} edit={editNode} trigger /><div className="dsh-taskboard-flow-line" />{tab.steps.map(node => <WorkflowNodeCard key={node.id} node={node} tabId={tab.id} edit={editNode} />)}</article>)}</div><footer>{catalog.map(item => <span key={item.kind} data-execution={item.execution}>{item.kind} · {item.execution === 'executable' ? t.executable : t.designOnly}</span>)}</footer><section className="dsh-taskboard-capabilities"><h3>{t.installedCapabilities}</h3><small>{t.skillDiscovery}: {capabilities?.skillDiscoveryComplete === true ? t.completeWord : t.refreshing}</small><div>{capabilities?.skills.map(skill => <button type="button" key={`skill-${skill.name}`} title={skill.description} onClick={() => { addCapability('skill', skill.name) }}>＋ {t.skill} · {skill.name}</button>)}</div><div>{capabilities?.mcpTools.map(tool => <button type="button" key={`mcp-${tool.name}`} title={tool.description} onClick={() => { addCapability('mcp', tool.name) }}>＋ {t.mcp} · {tool.name}</button>)}</div></section></>}</section></div>
 }
 
 function WorkflowNodeCard({ node, tabId, edit, trigger = false }: { node: WorkflowDocument['tabs'][number]['trigger']; tabId: string; edit: (action: 'up' | 'down' | 'copy' | 'delete' | 'true' | 'false', tabId: string, nodeId: string) => void; trigger?: boolean }) {
   const t = useStrings()
-  return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>Copy</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ True</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ False</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>True</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>False</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
+  return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>{t.copy}</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ {t.trueLabel}</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ {t.falseLabel}</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>{t.trueLabel}</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>{t.falseLabel}</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
 }
 
-function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, openSession, openNewSession, close }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void }) {
+function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const t = useStrings()
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
@@ -1061,6 +1121,11 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
     || (recurrence !== '' && recurrenceInterval !== String(task.recurrence?.interval ?? 1))
     || (recurrence !== '' && recurrenceUntil !== (task.recurrence?.until ?? ''))
   const currentVersion = detail?.task.version ?? task.version
+  // Report upward so Escape and the backdrop can confirm before discarding these local edits.
+  useEffect(() => {
+    onDirtyChange(dirty)
+    return () => { onDirtyChange(false) }
+  }, [dirty, onDirtyChange])
   useEffect(() => {
     setTitle(task.title); setDescription(task.description); setPriority(task.priority); setLabels(task.labels.join(', '))
     setStartDate(task.startDate ?? ''); setDueDate(task.dueDate ?? ''); setRecurrence(task.recurrence?.frequency ?? '')
@@ -1274,8 +1339,13 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
             <MetaField label={t.relations}>
               <div className="dsh-taskboard-relation-create"><select aria-label={t.relationKind} value={relationKind} onChange={event => { setRelationKind(event.target.value as typeof relationKind) }}><option value="parent">parent</option><option value="blocks">blocks</option><option value="related">related</option></select><select aria-label={t.relatedTask} value={relationTarget} onChange={event => { setRelationTarget(event.target.value) }}><option value="">{t.selectTask}</option>{tasks.filter(item => item.id !== task.id && item.projectId === task.projectId).map(item => <option key={item.id} value={item.id}>{item.identifier} · {item.title}</option>)}</select><button type="button" disabled={relationTarget === ''} onClick={() => { void mutate('task.relation', { taskId: task.id, expectedVersion: currentVersion, targetTaskId: relationTarget, kind: relationKind }).then(() => { setRelationTarget('') }) }}>{t.add}</button></div>
               {detail === undefined || detail.relations.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.relations.map(item => {
-                const sourceVersion = tasks.find(candidate => candidate.id === item.sourceTaskId)?.version
-                return <article key={item.id} className="dsh-taskboard-side-item"><strong>{relationLabel(item)}</strong><button type="button" disabled={sourceVersion === undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article>
+                // removeRelation checks the source task's version. For an outgoing relation that
+                // is this task, so prefer the detail version over the snapshot page, which may not
+                // contain the source at all.
+                const sourceVersion = item.sourceTaskId === task.id
+                  ? currentVersion
+                  : tasks.find(candidate => candidate.id === item.sourceTaskId)?.version
+                return <article key={item.id} className="dsh-taskboard-side-item"><strong>{relationLabel(item)}</strong><button type="button" disabled={sourceVersion === undefined} title={sourceVersion === undefined ? t.relationSourceUnloaded : undefined} onClick={() => { if (sourceVersion !== undefined) void mutate('relation.delete', { relationId: item.id, expectedVersion: sourceVersion }) }}>{t.delete}</button></article>
               })}
             </MetaField>
             <MetaField label={t.developmentContext}>
@@ -1402,14 +1472,14 @@ ${NAV_STYLES}
 .dsh-taskboard-header select,.dsh-taskboard-filters select,.dsh-taskboard-gantt>header select{height:36px;border-radius:18px}
 .dsh-taskboard-filters{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-filters input{flex:1;min-width:120px}
 .dsh-taskboard-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-tabs button{height:40px;padding:9px 16px 9px 12px;border:0;border-radius:12px;background:transparent}.dsh-taskboard-tabs button:hover{background:var(--dsw-specific-sidebar-nav-item-hover,#f1f3f5)}.dsh-taskboard-tabs button[aria-current=page]{background:var(--dsw-specific-sidebar-nav-item-active,#ebeef2)}
-.dsh-taskboard-error{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-error button{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:transparent;color:inherit;cursor:pointer}.dsh-taskboard-error button:hover{background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.12))}.dsh-taskboard-notice{padding:8px 16px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
+.dsh-taskboard-error{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:8px 16px;background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.05));color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-error button{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:transparent;color:inherit;cursor:pointer}.dsh-taskboard-error button:hover{background:var(--dsw-alias-interactive-bg-hover-danger,rgba(236,19,19,.12))}.dsh-taskboard-notice{padding:8px 16px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7);color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-discard-dialog{width:min(400px,calc(100vw - 32px));padding:20px;border-radius:14px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18))}.dsh-taskboard-discard-dialog h2{margin:0 0 8px;font-size:15px;font-weight:600}.dsh-taskboard-discard-dialog p{margin:0 0 16px;color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-discard-dialog div{display:flex;justify-content:flex-end;gap:8px}.dsh-taskboard-discard-dialog button{min-height:34px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:17px;background:transparent;font:inherit;cursor:pointer}.dsh-taskboard-discard-dialog button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-loading,.dsh-taskboard-empty{padding:32px;text-align:center;color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-content{display:flex;flex:1;min-height:0}.dsh-taskboard-view{flex:1;min-width:0;overflow:auto;padding:16px 24px 24px}
 .dsh-taskboard-create{display:flex;gap:8px;margin-bottom:16px}.dsh-taskboard-create input{flex:1}
 .dsh-taskboard-dashboard{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:12px}.dsh-taskboard-dashboard div{display:flex;flex-direction:column;padding:20px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff)}.dsh-taskboard-dashboard strong{font-size:30px;line-height:38px;font-weight:500}.dsh-taskboard-dashboard span{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.dsh-taskboard-board section,.dsh-taskboard-other{min-width:0;padding:12px;border-radius:12px;background:var(--dsw-specific-sidebar-fill,#f9fafb)}.dsh-taskboard-board h2,.dsh-taskboard-other h2{display:flex;align-items:center;gap:8px;font-size:14px;line-height:22px;font-weight:500;margin:0 0 10px}.dsh-taskboard-board h2 small,.dsh-taskboard-other h2 small{margin-left:auto;color:var(--dsw-alias-label-tertiary,#81858c);font-weight:400}
 .dsh-taskboard-status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-status-dot[data-status=todo],.dsh-taskboard-status-dot[data-status=done]{color:var(--dsw-alias-state-success-primary,#22c55e)}.dsh-taskboard-status-dot[data-status=in_progress]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.dsh-taskboard-status-dot[data-status=in_review]{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-status-dot[data-status=blocked]{color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-status-dot[data-status=canceled]{color:var(--dsw-alias-label-caption,#adb2b8)}.dsh-taskboard-status-dot[data-status=backlog]{color:var(--dsw-alias-label-tertiary,#81858c)}
 .dsh-taskboard-card{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-bottom:8px;padding:12px 14px;text-align:left;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);min-height:0}.dsh-taskboard-card:hover{border-color:var(--dsw-alias-label-dimmed,#e1e5ee);background:var(--dsw-alias-bg-layer-2,#fff)}.dsh-taskboard-card strong{font-weight:500}.dsh-taskboard-card small,.dsh-taskboard-card span{color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more{width:100%;display:flex;align-items:center;justify-content:center;gap:4px;min-height:32px;margin-top:4px;padding:6px 8px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-tertiary,#81858c)}.dsh-taskboard-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-more-label{font-size:12px;line-height:18px}.dsh-taskboard-other{margin-top:14px}.dsh-taskboard-other .dsh-taskboard-card{display:inline-flex;width:min(280px,100%);margin-right:8px}
-.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-table-wrap tbody tr{cursor:pointer}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
+.dsh-taskboard-table-wrap{overflow:auto}.dsh-taskboard-table-wrap table{width:100%;border-collapse:collapse}.dsh-taskboard-table-wrap th,.dsh-taskboard-table-wrap td{padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04));text-align:left}.dsh-taskboard-row-open{padding:0;border:0;background:transparent;color:var(--dsw-alias-link,#2563eb);font:inherit;text-align:left;cursor:pointer}.dsh-taskboard-row-open:hover{text-decoration:underline}.dsh-taskboard-table-wrap tbody tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}.dsh-taskboard-table-wrap th button{border:0;background:transparent;font-weight:500;min-height:0;padding:0;border-radius:0}
 .dsh-taskboard-gantt{position:relative;display:flex;flex-direction:column;gap:8px}.dsh-taskboard-gantt>header{display:flex;align-items:center;gap:10px}.dsh-taskboard-gantt>header label{display:flex;align-items:center;gap:5px}.dsh-taskboard-gantt>button{display:grid;grid-template-columns:220px 1fr minmax(180px,auto);gap:12px;align-items:center;text-align:left;border:0;background:transparent;min-height:0;padding:8px 0;border-radius:0}.dsh-taskboard-gantt>button:hover{background:transparent}.dsh-taskboard-gantt-track{position:relative;display:block;height:16px;border-radius:8px;background:var(--dsw-specific-sidebar-fill,#f9fafb);overflow:hidden}.dsh-taskboard-gantt-track i{position:absolute;top:2px;display:block;height:12px;border-radius:6px;background:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-today{position:absolute;top:42px;bottom:0;width:1px;background:var(--dsw-alias-state-error-primary,#ec1313);opacity:.45;pointer-events:none}.dsh-taskboard-gantt small{color:var(--dsw-alias-label-secondary,#61666b)}
 .dsh-taskboard-dialog-backdrop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.24));backdrop-filter:var(--dsw-mask-blur,blur(2px))}
 .dsh-taskboard-detail{width:min(1120px,100%);height:100%;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:0;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:24px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08));--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2,#d4d4d4);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2,#c4c4c4)}.dsh-taskboard-detail:focus{outline:none}
