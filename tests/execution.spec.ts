@@ -273,6 +273,32 @@ test('goal completion writes a result comment and does not copy existing comment
   assert.equal(completionResultComment([{ body: 'Implemented the endpoint.' }]), 'Ready for review.')
 })
 
+test('a human-started native Session binds its claim and maps a blocked Goal to the task', async () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness', workspaceId: 'workspace-1' }, human)
+    let task = service.provider.createTask({ projectId: project.id, title: 'Needs a decision', creator: human.actorId }, human)
+    task = service.provider.approve(task.id, task.version, human)
+    const sessionId = 'session-human-started'
+    const bound = service.provider.bindHumanSession(task.id, task.version, { sessionId, agentId: sessionId }, human)
+    assert.equal(bound.task.status, 'in_progress')
+    assert.equal(bound.claim.sessionId, sessionId)
+
+    const worker = new HarnessTaskboardWorker(ctx, service)
+    ;(worker as unknown as { onGoalChanged(agent: unknown, goal: unknown): void }).onGoalChanged({ id: sessionId }, {
+      id: 'goal-human-started', phase: 'blocked', objective: 'Need a human choice',
+      blockedReason: { message: 'Choose a deployment target.' }, createdAt: 1, updatedAt: 2,
+    })
+
+    assert.equal(service.provider.getTask(task.id).status, 'blocked')
+    assert.match(service.provider.getTaskDetail(task.id).comments.at(-1)?.body ?? '', /Choose a deployment target/)
+    await worker.stop()
+  } finally {
+    service.provider.close()
+  }
+})
+
 test('human comments on a claimed task reach the owning Session, and a blank Goal blocker is survivable', async () => {
   const ctx = new Context()
   const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })

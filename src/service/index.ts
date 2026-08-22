@@ -525,6 +525,11 @@ export class TaskboardService extends TypertRemoteService {
         )
       case 'task.approve':
         return this.provider.approve(this.taskId(input), this.version(input), actor)
+      case 'task.bind-session':
+        return this.provider.bindHumanSession(this.taskId(input), this.version(input), {
+          sessionId: string(input['sessionId'], 'sessionId'),
+          agentId: string(input['agentId'], 'agentId'),
+        }, actor)
       case 'task.accept':
         return this.provider.accept(this.taskId(input), this.version(input), actor)
       case 'task.move':

@@ -391,6 +391,12 @@ export class TaskboardClientController {
   async openNewSession(workspaceId: string, detail: TaskDetail): Promise<string> {
     if (this.createTaskSession === undefined) throw new Error('native Session creation is unavailable')
     const sessionId = await this.createTaskSession(workspaceId, renderTaskSessionDraft(detail))
+    await this.mutate('task.bind-session', {
+      taskId: detail.task.id,
+      expectedVersion: detail.task.version,
+      sessionId,
+      agentId: sessionId,
+    })
     this.close()
     return sessionId
   }

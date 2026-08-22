@@ -600,6 +600,32 @@ export class SqliteTaskboardProvider {
     })
   }
 
+  /** Bind a human-created native Session to a task before the Session starts working.
+   *
+   * The browser is allowed to initiate this association, but the resulting claim is owned by the
+   * Session's Agent id. That keeps model tools and Goal lifecycle events subject to the same
+   * ownership checks as an automation-created worker. */
+  bindHumanSession(taskId: TaskboardTaskId, expectedVersion: number, request: FreshClaimRequest, actor: TaskboardActor): {
+    task: TaskboardTask
+    claim: TaskboardClaim
+  } {
+    requireHuman(actor, 'bind native Session')
+    return this.transaction(() => {
+      const current = this.mutableTask(taskId, expectedVersion)
+      requireStatus(current.status, ['todo', 'in_progress'], 'bind native Session')
+      const timestamp = now()
+      const claimId = this.insertFreshClaim(taskId, expectedVersion, current.developmentContext, request, timestamp)
+      if (current.status === 'todo') this.writeStatus(taskId, expectedVersion, 'in_progress', timestamp)
+      else this.bumpTaskVersion(taskId, expectedVersion, timestamp)
+      const task = this.getTask(taskId)
+      this.activity(taskId, 'task.session-bound', actor, { status: current.status }, {
+        status: task.status, claimId, sessionId: request.sessionId,
+      }, timestamp)
+      this.bumpRevision()
+      return { task, claim: mapClaim(this.claimById(claimId)) }
+    })
+  }
+
   submitReview(taskId: TaskboardTaskId, expectedVersion: number, verification: string, resultComment: string, actor: TaskboardActor): TaskboardTask {
     if (actor.kind === 'human') throw new TaskboardError('review submission requires the owning Agent', 'TASK_FOREIGN_CLAIM')
     const verificationText = requiredText(verification, 'verification')

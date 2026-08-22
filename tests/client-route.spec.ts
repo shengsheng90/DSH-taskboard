@@ -222,8 +222,14 @@ test('Taskboard stays open when asynchronous native Session selection fails', as
 
 test('explicit new Session creation carries an unsent task draft and returns the native Session id', async () => {
   let captured: { workspaceId: string; draft: string } | undefined
+  let bound: Record<string, unknown> | undefined
   const controller = new TaskboardClientController(
-    { hostDescription: { subscribe: () => () => undefined } } as never,
+    { hostDescription: { subscribe: () => () => undefined }, rpc: {
+      call: (_channel: string, endpoint: string, payload: Record<string, unknown>) => {
+        if (endpoint === 'task.bind-session') bound = payload
+        return Promise.resolve({ ok: true, value: {} })
+      },
+    } } as never,
     {} as never,
     undefined,
     (workspaceId, draft) => { captured = { workspaceId, draft }; return Promise.resolve('session-native') },
@@ -238,6 +244,9 @@ test('explicit new Session creation carries an unsent task draft and returns the
   assert.equal(sessionId, 'session-native')
   assert.equal(captured?.workspaceId, 'workspace-one')
   assert.match(captured?.draft ?? '', /Opaque task id: task-one/)
+  assert.deepEqual(bound, {
+    taskId: 'task-one', expectedVersion: 2, sessionId: 'session-native', agentId: 'session-native',
+  })
 })
 
 test('client copy selects complete Chinese and English labels from the Harness language', () => {
