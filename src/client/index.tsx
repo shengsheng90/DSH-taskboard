@@ -1477,7 +1477,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
               {developmentKind === 'worktree' && <input value={worktreePath} aria-label={t.worktreePath} placeholder={t.worktreePath} onChange={event => { setWorktreePath(event.target.value) }} />}
             </MetaField>
             <MetaField label={t.sessions}>
-              <button type="button" disabled={project?.workspaceId === undefined} title={project?.workspaceId === undefined ? t.workspaceRequired : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
+              <button type="button" disabled={project?.workspaceId === undefined || (task.status !== 'todo' && task.status !== 'in_progress')} title={project?.workspaceId === undefined ? t.workspaceRequired : task.status !== 'todo' && task.status !== 'in_progress' ? t.sessionTaskMustBeActive : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
               {detail === undefined || detail.claims.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.claims.map(item => {
                 const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
                 return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>

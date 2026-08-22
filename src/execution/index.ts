@@ -8,7 +8,7 @@ import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type {
-  AutomationActor, AutomationRule, TaskboardChangeEvent, TaskboardClaim, TaskboardTask, WorkflowNode,
+  AgentActor, AutomationActor, AutomationRule, TaskboardChangeEvent, TaskboardClaim, TaskboardTask, WorkflowNode,
 } from '../domain/index.js'
 import { TaskId, TaskboardError } from '../domain/index.js'
 import type { TaskboardAutomationWorker } from '../automation/index.js'
@@ -279,12 +279,14 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
 
   private onGoalChanged(changedAgent: Agent, goal: GoalView): void {
     const claim = this.taskboard.provider.listClaims(['active'])
-      .find(item => item.sessionId === changedAgent.id && item.agentId === changedAgent.id && item.automationId !== undefined)
-    if (claim?.automationId === undefined) return
+      .find(item => item.sessionId === changedAgent.id && item.agentId === changedAgent.id)
+    if (claim === undefined) return
     const task = this.taskboard.provider.getTask(claim.taskId)
     if (task.status !== 'in_progress') return
-    const rule = this.taskboard.provider.getAutomation(claim.automationId)
-    const owner = actor(rule, claim)
+    let rule: AutomationRule | undefined
+    const owner: AutomationActor | AgentActor = claim.automationId === undefined
+      ? { kind: 'agent', actorId: claim.agentId, sessionId: claim.sessionId, agentId: claim.agentId }
+      : actor(rule = this.taskboard.provider.getAutomation(claim.automationId), claim)
     if (goal.phase !== 'complete' && goal.phase !== 'blocked') return
     try {
       if (goal.phase === 'complete') {
@@ -303,9 +305,10 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
     } catch (error) {
       // The Goal is over but the authoritative task disagrees. Leave it observable instead of
       // throwing into the listener chain, and still let go of the Session below.
-      this.recordGoalFailure(rule, task, error)
+      if (rule !== undefined) this.recordGoalFailure(rule, task, error)
     }
-    // Review submission and blocking both retire the claim, so this worker is done with the Session.
+    // Goal terminal state ends this worker's active turn. A blocked claim remains visible until a
+    // human resumes or releases it; a submitted review claim is retired by the provider.
     void this.releaseUnclaimed(claim.sessionId)
   }
 
