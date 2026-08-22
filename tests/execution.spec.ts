@@ -18,6 +18,7 @@ test('native worker binds workspace, persists task input, follows human changes,
   const ctx = new Context()
   const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
   const messages: Message[] = []
+  const steered: Message[] = []
   const createdGoals: unknown[] = []
   const attachedSessions: string[] = []
   const createOptions: Array<Record<string, unknown>> = []
@@ -25,6 +26,7 @@ test('native worker binds workspace, persists task input, follows human changes,
   let activeAgent: {
     id: string
     followup(message: Message): void
+    steer(message: Message): void
     whenIdle(): Promise<void>
   } | undefined
 
@@ -45,6 +47,7 @@ test('native worker binds workspace, persists task input, follows human changes,
       activeAgent = {
         id: options.sessionId,
         followup: message => { messages.push(message) },
+        steer: message => { steered.push(message) },
         whenIdle: () => Promise.resolve(),
       }
       return { agent: activeAgent, dispose: () => { disposed.push(options.sessionId); return Promise.resolve() } }
@@ -54,11 +57,19 @@ test('native worker binds workspace, persists task input, follows human changes,
 
   try {
     const project = service.provider.createProject({ key: 'DSH', name: 'Harness', workspaceId: 'workspace-1' }, human)
+    const workflow = service.provider.createWorkflow(project.id, 'Implementation path', {
+      tabs: [{
+        id: 'tab-1', name: 'Delivery',
+        trigger: { id: 'trigger-1', kind: 'issue-trigger', execution: 'design-only', config: { repository: 'acme/app' } },
+        steps: [{ id: 'step-1', kind: 'planning', execution: 'design-only', config: { owner: 'agent' } }],
+      }],
+    }, human)
     let task = service.provider.createTask({
       projectId: project.id,
       title: 'Native worker',
       description: 'Implement and verify the execution path.',
       creator: human.actorId,
+      workflowId: workflow.id,
       developmentContext: { kind: 'worktree', path: '/workspace/project/.worktrees/task', branch: 'task/native-worker' },
     }, human)
     task = service.provider.approve(task.id, task.version, human)
@@ -91,16 +102,19 @@ test('native worker binds workspace, persists task input, follows human changes,
     })
     assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /Never modify the task description/)
     assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /Only a human may accept it as done/)
+    assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /Implementation path \(guidance-only; nodes are not run automatically\)/)
+    assert.match(messages[0]?.content[0]?.type === 'text' ? messages[0].content[0].text : '', /planning \[design-only\]; config=\{"owner":"agent"\}/)
 
     const inProgress = service.provider.getTask(task.id)
     service.provider.updateTask(inProgress.id, inProgress.version, { description: 'New durable requirement.' }, human)
-    assert.equal(messages.length, 2)
-    assert.deepEqual(messages[1]?.source, {
+    assert.equal(messages.length, 1)
+    assert.equal(steered.length, 1)
+    assert.deepEqual(steered[0]?.source, {
       kind: 'taskboard', taskId: task.id, claimId: activeClaim.id,
       claimedRevision: service.provider.getTask(task.id).version,
     })
-    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /changed after your claim/)
-    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /New durable requirement/)
+    assert.match(steered[0]?.content[0]?.type === 'text' ? steered[0].content[0].text : '', /changed after your claim/)
+    assert.match(steered[0]?.content[0]?.type === 'text' ? steered[0].content[0].text : '', /New durable requirement/)
 
     assert.ok(activeAgent)
     ;(worker as unknown as { onGoalChanged(agent: unknown, goal: unknown): void }).onGoalChanged(activeAgent, {
@@ -263,7 +277,8 @@ test('human comments on a claimed task reach the owning Session, and a blank Goa
   const ctx = new Context()
   const service = new TaskboardService(ctx, { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
   const messages: Message[] = []
-  let activeAgent: { id: string; followup(message: Message): void; whenIdle(): Promise<void> } | undefined
+  const steered: Message[] = []
+  let activeAgent: { id: string; followup(message: Message): void; steer(message: Message): void; whenIdle(): Promise<void> } | undefined
   ctx.provide('agentPresets', { mount: async () => undefined } as never)
   provideDefaultModel(ctx)
   ctx.provide('workspaceRegistry', { get: () => ({ path: '/workspace/project', attachSession: async () => undefined }) } as never)
@@ -272,7 +287,12 @@ test('human comments on a claimed task reach the owning Session, and a blank Goa
     list: () => activeAgent === undefined ? [] : [{ id: activeAgent.id }],
     create: async (options: { sessionId: string; setup(context: Context): Promise<void> }) => {
       await options.setup(new Context())
-      activeAgent = { id: options.sessionId, followup: message => { messages.push(message) }, whenIdle: () => Promise.resolve() }
+      activeAgent = {
+        id: options.sessionId,
+        followup: message => { messages.push(message) },
+        steer: message => { steered.push(message) },
+        whenIdle: () => Promise.resolve(),
+      }
       return { agent: activeAgent, dispose: () => Promise.resolve() }
     },
     resume: async () => { throw new Error('unexpected resume') },
@@ -295,15 +315,16 @@ test('human comments on a claimed task reach the owning Session, and a blank Goa
     // `task.commented` kind that nothing emits, so human comments never reached the Session.
     const claimed = service.provider.getTask(task.id)
     service.provider.comment(claimed.id, claimed.version, 'Also cover the blank-input case.', human)
-    assert.equal(messages.length, 2)
-    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /changed after your claim/)
-    assert.match(messages[1]?.content[0]?.type === 'text' ? messages[1].content[0].text : '', /Also cover the blank-input case/)
+    assert.equal(messages.length, 1)
+    assert.equal(steered.length, 1)
+    assert.match(steered[0]?.content[0]?.type === 'text' ? steered[0].content[0].text : '', /changed after your claim/)
+    assert.match(steered[0]?.content[0]?.type === 'text' ? steered[0].content[0].text : '', /Also cover the blank-input case/)
 
     const commentId = service.provider.getTaskDetail(task.id).comments.at(-1)?.id ?? ''
     const beforeEdit = service.provider.getTask(task.id)
     service.provider.updateComment(beforeEdit.id, beforeEdit.version, commentId, 'Cover the whitespace case instead.', human)
-    assert.equal(messages.length, 3)
-    assert.match(messages[2]?.content[0]?.type === 'text' ? messages[2].content[0].text : '', /whitespace case/)
+    assert.equal(steered.length, 2)
+    assert.match(steered[1]?.content[0]?.type === 'text' ? steered[1].content[0].text : '', /whitespace case/)
 
     // A Goal can report a blank reason. `requiredText` used to throw that straight out of the Host
     // event dispatch, leaving the task in progress and the Session handle held.

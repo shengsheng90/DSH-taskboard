@@ -325,7 +325,7 @@ export class TaskboardClientController {
   constructor(
     readonly connection: ConnectionHandle,
     private readonly remote: TaskboardRemoteNamespace,
-    private readonly selectSession?: (sessionId: string) => void,
+    private readonly selectSession?: (sessionId: string) => void | Promise<void>,
     private readonly createTaskSession?: (workspaceId: string, draft: string) => Promise<string>,
   ) {
     if (typeof window !== 'undefined') window.addEventListener('hashchange', this.onRoute)
@@ -382,8 +382,9 @@ export class TaskboardClientController {
     return change
   }
 
-  openSession(sessionId: string): void {
-    this.selectSession?.(sessionId)
+  async openSession(sessionId: string): Promise<void> {
+    if (this.selectSession === undefined) throw new Error('native Session navigation is unavailable')
+    await this.selectSession(sessionId)
     this.close()
   }
 
@@ -396,10 +397,9 @@ export class TaskboardClientController {
 
   async mutate(endpoint: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted()
-    const carried = await this.remote.mutate({ endpoint, payloadJson: JSON.stringify(payload) })
-    if (!carried.ok) throw new Error(carried.error.message)
-    if (!carried.value.ok) throw new Error(`${carried.value.errorCode ?? 'taskboard'}: ${carried.value.errorMessage ?? 'mutation failed'}`)
-    return JSON.parse(carried.value.valueJson ?? 'null') as unknown
+    const result = await this.connection.rpc.call('/taskboard', endpoint, payload, signal)
+    if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+    return result.value
   }
 
   /** Search the whole project in SQLite. The board can only filter the tasks a snapshot carried. */

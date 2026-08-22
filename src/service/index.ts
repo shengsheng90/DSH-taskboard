@@ -401,14 +401,14 @@ export class TaskboardService extends TypertRemoteService {
         return { ok: false, errorCode: error instanceof TaskboardError ? error.code : 'internal', errorMessage: message }
       }
     }
-    if (request.endpoint === 'automation.run-now') {
-      const result = await this.dispatchAutomationRunNowFailable(payload)
-      if (!result.ok) return { ok: false, errorCode: result.failure.code, errorMessage: result.failure.message }
-      return { ok: true, valueJson: JSON.stringify(result.value ?? null) }
+    // Typert Remotes are reachable through non-loopback browser transports. Keep this legacy
+    // carrier read-only: every human mutation, attachment ticket, and immediate automation run
+    // must cross the Connection RPC channel registered with `authority: 'loopback'` above.
+    return {
+      ok: false,
+      errorCode: 'loopback-required',
+      errorMessage: `Taskboard endpoint ${request.endpoint} requires a loopback connection`,
     }
-    const result = this.dispatchHumanFailable(request.endpoint, payload, human('human:web-client'))
-    if (!result.ok) return { ok: false, errorCode: result.failure.code, errorMessage: result.failure.message }
-    return { ok: true, valueJson: JSON.stringify(result.value ?? null) }
   }
 
   /** Wait for a committed revision change without requiring a Harness event extension.

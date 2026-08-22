@@ -15,8 +15,11 @@ export default {
   dts: false,
   sourcemap: true,
   clean: false,
-  external: externals,
-  noExternal: (id: string) => externals.includes(id) ? undefined : true,
+  deps: {
+    neverBundle: externals,
+    alwaysBundle: (id: string) => externals.includes(id) ? undefined : true,
+    onlyBundle: ['zod'],
+  },
   outputOptions: {
     entryFileNames: 'client.js',
     banner: 'window.__ModuleLoader__.load({ id: "@shengsheng/dsh-taskboard", factory: (require) => {',

@@ -9,7 +9,7 @@
 **包名：** `@shengsheng/dsh-taskboard`  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
-**兼容 Host：** DeepSeek Harness `0.1.0-rc.5`
+**兼容 Host：** DeepSeek Harness `0.1.0-rc.8` 和 `0.1.1-rc.2`
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
@@ -37,7 +37,7 @@ Agent 只能把已验证工作提交到 `in_review`；只有经过认证的用�
 |---|---|
 | Node.js | `^22.19.0` 或 `>=24.0.0`（推荐 24；使用内置 `node:sqlite`） |
 | pnpm | `11`（`packageManager` 为 `pnpm@11.15.1`） |
-| DeepSeek Harness | `0.1.0-rc.5` 的 checkout 或安装，**web** profile |
+| DeepSeek Harness | `0.1.0-rc.8` 或 `0.1.1-rc.2` 的 checkout 或安装，**web** profile |
 | 网络 | 仅克隆本仓库和安装 Node 依赖时需要 |
 | 权限 | 可写 `$DSH_HOME`（默认 `~/.dsh`），并能重启 Harness 进程 |
 
@@ -314,7 +314,9 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 
 ### 自动化
 
-在任务板页面为项目新建自动化：间隔、Agent 预设、模型路由、工作器数量和配额策略。启用后，Host 调度器会认领合格 `todo`，驱动根 Agent Session 与 Goal，并停在 `in_review`。配额不确定时会暂停新认领，但不取消已在跑的工作。
+在任务板页面为项目新建自动化：间隔、Agent 预设、模型路由、工作器数量和配额策略。启用后，Host 调度器会认领合格 `todo`，驱动根 Agent Session 与 Goal，并停在 `in_review`。Harness 目前没有提供主动配额信号，因此插件会把配额状态视为“不确定”：新规则默认选择**忽略**；若明确选择**配额不确定时暂停**，则不会开始新认领，但不会取消已在跑的工作。
+
+为任务分配已保存工作流后，工作流的标签页、分支、节点类型和配置会作为**执行指引**加入 Agent 的任务指令。调度器不会自动调用工作流节点；`executable` 只表示 Host 为该节点类型注册了 provider，并不表示分配工作流会隐式运行节点。
 
 ## 配置
 

@@ -279,7 +279,7 @@ test('human RPC can move a task status from the board without a claim', () => {
   }
 })
 
-test('human RPC can run an automation immediately without moving its schedule', async () => {
+test('loopback automation intent runs immediately while the generic Remote refuses it', async () => {
   const ctx = new Context()
   const service = new TaskboardService(ctx, config)
   const actor = { kind: 'human', actorId: 'human' } as const
@@ -287,7 +287,7 @@ test('human RPC can run an automation immediately without moving its schedule', 
     const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, actor)
     const task = service.provider.createTask({ projectId: project.id, title: 'Now', creator: 'human', status: 'todo' }, actor)
     let rule = service.provider.createAutomation(project.id, {
-      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
+      intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'ignore', autoPauseOnEmpty: false,
     }, actor)
     rule = service.provider.updateAutomation(rule.id, rule.version, { state: 'enabled' }, actor)
     const scheduledAt = Date.now() + 60_000
@@ -306,11 +306,13 @@ test('human RPC can run an automation immediately without moving its schedule', 
       },
     })
     service.bindAutomation(coordinator)
-    const result = await service.remoteMutate({
+    const refusedRemote = await service.remoteMutate({
       endpoint: 'automation.run-now',
       payloadJson: JSON.stringify({ automationId: rule.id }),
     })
-    assert.equal(result.ok, true)
+    assert.equal(refusedRemote.ok, false)
+    assert.equal(refusedRemote.errorCode, 'loopback-required')
+    await service.runAutomationNow(rule.id)
     const after = service.provider.getAutomation(rule.id)
     assert.deepEqual(started, [task.id])
     assert.equal(after.nextEligibleAt, scheduledAt)
@@ -321,11 +323,7 @@ test('human RPC can run an automation immediately without moving its schedule', 
       const otherRule = unbound.provider.createAutomation(other.id, {
         intervalMs: 30_000, agentPreset: 'coding', concurrencyLimit: 1, quotaPolicy: 'pause-on-uncertain', autoPauseOnEmpty: false,
       }, actor)
-      const refused = await unbound.remoteMutate({
-        endpoint: 'automation.run-now',
-        payloadJson: JSON.stringify({ automationId: otherRule.id }),
-      })
-      assert.equal(refused.ok, false)
+      await assert.rejects(() => unbound.runAutomationNow(otherRule.id), /coordinator is not running/)
     } finally {
       unbound.provider.close()
     }
@@ -436,7 +434,7 @@ test('archived work is budgeted apart from the live board and stays searchable p
   }
 })
 
-test('the Typert mutation carrier reports the domain code, not a flattened internal', async () => {
+test('the Typert mutation carrier refuses human writes outside the loopback RPC channel', async () => {
   const ctx = new Context()
   const service = new TaskboardService(ctx, config)
   try {
@@ -446,10 +444,8 @@ test('the Typert mutation carrier reports the domain code, not a flattened inter
     })
     assert.equal(result.ok, false)
     if (result.ok) return
-    // Callers that switch on the code used to see every conflict, validation error, and genuine
-    // fault as the same `internal`.
-    assert.equal(result.errorCode, 'TASK_NOT_FOUND')
-    assert.equal(result.errorMessage, 'task missing was not found')
+    assert.equal(result.errorCode, 'loopback-required')
+    assert.match(result.errorMessage ?? '', /requires a loopback connection/)
   } finally {
     service.provider.close()
   }

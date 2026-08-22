@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
-import { taskboardStrings } from '../src/client/index.js'
+import { openTaskSession, taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
 test('Taskboard deep links preserve project, view, and task identity', () => {
@@ -151,6 +151,73 @@ test('client change watch uses the plugin Remote carrier and preserves revision 
   assert.ok(payload.watcherId.length > 0)
   await controller.watchChanges(7)
   assert.equal((JSON.parse(request?.payloadJson ?? 'null') as { watcherId: string }).watcherId, payload.watcherId)
+})
+
+test('client mutations use the loopback Connection RPC and never the generic Remote carrier', async () => {
+  let call: { channel: string; endpoint: string; payload: unknown } | undefined
+  const controller = new TaskboardClientController({
+    hostDescription: { subscribe: () => () => undefined },
+    rpc: {
+      call: (channel: string, endpoint: string, payload: unknown) => {
+        call = { channel, endpoint, payload }
+        return Promise.resolve({ ok: true, value: { id: 'project-1' } })
+      },
+    },
+  } as never, {
+    mutate: () => { throw new Error('generic Remote must not carry human writes') },
+  } as never)
+
+  assert.deepEqual(await controller.mutate('project.create', { request: { key: 'DSH', name: 'Harness' } }), { id: 'project-1' })
+  assert.deepEqual(call, {
+    channel: '/taskboard', endpoint: 'project.create', payload: { request: { key: 'DSH', name: 'Harness' } },
+  })
+})
+
+test('reported taskboard Sessions refresh from persistence after their live Agents are disposed', async () => {
+  // Regression samples from CES-37 and CES-32: both durable logs still existed, but the
+  // host/session-removed frame had already removed their ids from the client Session list.
+  const historicalSessionIds = [
+    'taskboard-d318f3cc-81e0-48e1-98da-ddbb56cf5e16',
+    'taskboard-c15498a6-2f70-472d-b6f7-de53571f6107',
+  ]
+  const known = new Set<string>()
+  const calls: string[] = []
+  const navigator = {
+    list: { getSnapshot: () => ({ byId: Object.fromEntries([...known].map(id => [id, {}])) }) },
+    refresh: () => {
+      calls.push('refresh')
+      for (const sessionId of historicalSessionIds) known.add(sessionId)
+      return Promise.resolve()
+    },
+    open: (sessionId: string) => { calls.push(`open:${sessionId}`) },
+  }
+
+  await openTaskSession(navigator, historicalSessionIds[0] ?? '')
+  assert.deepEqual(calls, ['refresh', `open:${historicalSessionIds[0]}`])
+
+  await openTaskSession(navigator, historicalSessionIds[1] ?? '')
+  assert.deepEqual(calls, ['refresh', `open:${historicalSessionIds[0]}`, `open:${historicalSessionIds[1]}`])
+})
+
+test('historical Session navigation reports a missing persisted Session instead of calling open', async () => {
+  let opened = false
+  await assert.rejects(openTaskSession({
+    list: { getSnapshot: () => ({ byId: {} }) },
+    refresh: () => Promise.resolve(),
+    open: () => { opened = true },
+  }, 'taskboard-missing'), /Session taskboard-missing is unavailable/)
+  assert.equal(opened, false)
+})
+
+test('Taskboard stays open when asynchronous native Session selection fails', async () => {
+  const controller = new TaskboardClientController(
+    { hostDescription: { subscribe: () => () => undefined } } as never,
+    {} as never,
+    () => Promise.reject(new Error('Session taskboard-missing is unavailable')),
+  )
+  controller.open()
+  await assert.rejects(controller.openSession('taskboard-missing'), /is unavailable/)
+  assert.equal(controller.getSnapshot().open, true)
 })
 
 test('explicit new Session creation carries an unsent task draft and returns the native Session id', async () => {

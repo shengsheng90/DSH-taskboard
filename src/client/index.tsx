@@ -36,6 +36,22 @@ interface PageInjectedProps extends InjectedProps {
   workspaces: IWorkspaces
 }
 
+interface TaskSessionNavigator {
+  readonly list: { getSnapshot(): { readonly byId: Readonly<Record<string, unknown>> } }
+  refresh(): Promise<void>
+  open(sessionId: string): void
+}
+
+/** A disposed automation Agent becomes a persisted cold Session. Refresh the native list before
+ *  selecting it: sessions.open intentionally rejects ids absent from the current list snapshot. */
+export async function openTaskSession(navigator: TaskSessionNavigator, sessionId: string): Promise<void> {
+  if (navigator.list.getSnapshot().byId[sessionId] === undefined) await navigator.refresh()
+  if (navigator.list.getSnapshot().byId[sessionId] === undefined) {
+    throw new Error(`Session ${sessionId} is unavailable`)
+  }
+  navigator.open(sessionId)
+}
+
 /** Narrow structural face used at the plugin boundary; the service is provided by dsh-client-ui-conversation. */
 interface ConversationDraftPort {
   readonly input: { for(ctx: ClientContext): { setDraft(text: string): void } }
@@ -558,7 +574,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           </div>
         </div>
       </div>}
-      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} preview={id => controller.previewAttachmentUrl(id)} openSession={sessionId => { controller.openSession(sessionId) }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
+      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} preview={id => controller.previewAttachmentUrl(id)} openSession={async sessionId => { setBusy(true); try { await controller.openSession(sessionId) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
     </div>
   )
 }
@@ -746,7 +762,7 @@ function AutomationActions({ project, automations, defaults, mutate }: {
   const minimumIntervalSeconds = Math.ceil((defaults?.minIntervalMs ?? 30_000) / 1000)
   const [intervalSeconds, setIntervalSeconds] = useState(minimumIntervalSeconds)
   const [concurrencyLimit, setConcurrencyLimit] = useState(1)
-  const [quotaPolicy, setQuotaPolicy] = useState<'pause-on-uncertain' | 'ignore'>('pause-on-uncertain')
+  const [quotaPolicy, setQuotaPolicy] = useState<'pause-on-uncertain' | 'ignore'>('ignore')
   const [autoPauseOnEmpty, setAutoPauseOnEmpty] = useState(false)
   useEffect(() => {
     setAgentPreset(defaults?.agentPreset ?? 'standard')
@@ -1179,7 +1195,7 @@ function WorkflowNodeCard({ node, tabId, edit, trigger = false }: { node: Workfl
   return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>{t.copy}</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ {t.trueLabel}</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ {t.falseLabel}</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>{t.trueLabel}</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>{t.falseLabel}</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
 }
 
-function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => void; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
+function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => Promise<void>; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const t = useStrings()
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
@@ -1464,7 +1480,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
               <button type="button" disabled={project?.workspaceId === undefined} title={project?.workspaceId === undefined ? t.workspaceRequired : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
               {detail === undefined || detail.claims.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.claims.map(item => {
                 const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
-                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" onClick={() => { openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
+                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
               })}
             </MetaField>
             <div className="dsh-taskboard-actions">
@@ -1531,10 +1547,19 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     const workspaces = remoteCtx.get('workspaces') as unknown as IWorkspaces
     const conversation = remoteCtx.get('conversation') as unknown as ConversationDraftPort
     const mountedRemote = remoteCtx.get('remote') as unknown as TypertClientRemote
+    const refreshSessions = (sessions as unknown as { refresh?: () => Promise<void> }).refresh
+    const sessionNavigator: TaskSessionNavigator = {
+      list: sessions.list as unknown as TaskSessionNavigator['list'],
+      refresh: async () => {
+        if (refreshSessions === undefined) throw new Error('Native Session list refresh is unavailable')
+        await refreshSessions.call(sessions)
+      },
+      open: sessionId => { sessions.open(sessionId as never) },
+    }
     const controller = new TaskboardClientController(
       connection,
       mountedRemote.taskboard,
-      sessionId => { sessions.open(sessionId as never) },
+      sessionId => openTaskSession(sessionNavigator, sessionId),
       async (workspaceId, draft) => {
         const sessionId = await workspaces.connectWorkspace(workspaceId as never)
         const scoped = sessions.scope(sessionId)

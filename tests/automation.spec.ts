@@ -11,7 +11,7 @@ const config: AutomationRuleConfig = {
   intervalMs: 30_000,
   agentPreset: 'coding',
   concurrencyLimit: 1,
-  quotaPolicy: 'pause-on-uncertain',
+  quotaPolicy: 'ignore',
   autoPauseOnEmpty: false,
 }
 
@@ -50,14 +50,52 @@ test('quota uncertainty pauses new claims without touching todo work', async () 
   try {
     const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
     const task = service.provider.createTask({ projectId: project.id, title: 'Wait', creator: human.actorId, status: 'todo' }, human)
-    let rule = service.provider.createAutomation(project.id, config, human)
+    let rule = service.provider.createAutomation(project.id, { ...config, quotaPolicy: 'pause-on-uncertain' }, human)
     rule = service.provider.updateAutomation(rule.id, rule.version, { state: 'enabled' }, human)
-    const coordinator = new TaskboardAutomationCoordinator(service, { start: () => Promise.reject(new Error('must not start')) }, { state: () => Promise.resolve('uncertain') })
+    const coordinator = new TaskboardAutomationCoordinator(service, { start: () => Promise.reject(new Error('must not start')) })
     await coordinator.runNow(rule.id)
     const paused = service.provider.getAutomation(rule.id)
     assert.equal(paused.state, 'paused')
     assert.equal(paused.lastDecision?.kind, 'quota-paused')
     assert.equal(service.provider.getTask(task.id).status, 'todo')
+    await coordinator.stop()
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('automation scans past a dependency-blocked first candidate page', async () => {
+  const service = new TaskboardService(new Context(), { databasePath: ':memory:', attachmentRoot: '.dsh/test' })
+  try {
+    const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
+    const prerequisite = service.provider.createTask({ projectId: project.id, title: 'Prerequisite', creator: human.actorId }, human)
+    const blocked = service.provider.createTask({ projectId: project.id, title: 'Blocked', creator: human.actorId, status: 'todo' }, human)
+    service.provider.addRelation(prerequisite.id, prerequisite.version, blocked.id, 'blocks', human)
+    const eligible = service.provider.createTask({ projectId: project.id, title: 'Eligible after page one', creator: human.actorId, status: 'todo' }, human)
+    let rule = service.provider.createAutomation(project.id, config, human)
+    rule = service.provider.updateAutomation(rule.id, rule.version, { state: 'enabled' }, human)
+
+    // Model a full first page without creating 500 redundant rows. The old one-page drain never
+    // requested offset 500, so the eligible task was starved indefinitely.
+    const provider = service.provider as unknown as {
+      listTasks(input: { statuses?: readonly string[]; limit?: number; offset?: number }): TaskboardTask[]
+    }
+    const originalListTasks = provider.listTasks.bind(service.provider)
+    provider.listTasks = input => {
+      if (input.statuses?.includes('todo') === true && input.limit === 500) {
+        if ((input.offset ?? 0) === 0) return Array.from({ length: 500 }, () => blocked)
+        if (input.offset === 500) return [eligible]
+        return []
+      }
+      return originalListTasks(input)
+    }
+
+    const started: string[] = []
+    const coordinator = new TaskboardAutomationCoordinator(service, owningWorker(service, started))
+    await coordinator.runNow(rule.id)
+    assert.deepEqual(started, [eligible.id])
+    assert.equal(service.provider.getTask(eligible.id).status, 'in_progress')
+    assert.equal(service.provider.getTask(blocked.id).status, 'todo')
     await coordinator.stop()
   } finally {
     service.provider.close()
@@ -258,7 +296,7 @@ test('immediate run does not pause on uncertain quota or move the schedule', asy
   try {
     const project = service.provider.createProject({ key: 'DSH', name: 'Harness' }, human)
     service.provider.createTask({ projectId: project.id, title: 'Wait', creator: human.actorId, status: 'todo' }, human)
-    let rule = service.provider.createAutomation(project.id, config, human)
+    let rule = service.provider.createAutomation(project.id, { ...config, quotaPolicy: 'pause-on-uncertain' }, human)
     rule = service.provider.updateAutomation(rule.id, rule.version, { state: 'enabled' }, human)
     const scheduledAt = Date.now() + 30_000
     rule = service.provider.recordAutomationDecision(rule.id, rule.version, {

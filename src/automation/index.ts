@@ -12,7 +12,11 @@ export interface TaskboardQuotaPolicy {
   state(rule: AutomationRule): Promise<QuotaState>
 }
 
-const DEFAULT_QUOTA: TaskboardQuotaPolicy = { state: () => Promise.resolve('available') }
+// Harness does not currently publish a proactive quota signal. Unknown must stay unknown instead
+// of silently disabling `pause-on-uncertain`; operators can explicitly select `ignore`.
+const DEFAULT_QUOTA: TaskboardQuotaPolicy = { state: () => Promise.resolve('uncertain') }
+
+export const AUTOMATION_CANDIDATE_PAGE_SIZE = 500
 
 /** Claim failures that only mean "this candidate is taken", so the drain must try the next one.
  *  Treating them as fatal used to abandon the rest of the queue for the whole round. */
@@ -181,7 +185,10 @@ export class TaskboardAutomationCoordinator {
         await Promise.race(inFlight)
         continue
       }
-      const candidates = this.taskboard.provider.listTasks({ projectId: rule.projectId, statuses: ['todo'], limit: 500 })
+      let candidateOffset = 0
+      let candidates = this.taskboard.provider.listTasks({
+        projectId: rule.projectId, statuses: ['todo'], limit: AUTOMATION_CANDIDATE_PAGE_SIZE, offset: candidateOffset,
+      })
       if (candidates.length === 0) {
         if (inFlight.size > 0) {
           await Promise.allSettled([...inFlight])
@@ -197,22 +204,29 @@ export class TaskboardAutomationCoordinator {
       let started = 0
       let dependencyBlocked = 0
       let contended = 0
-      for (const task of candidates) {
-        if (started >= slots) break
-        try {
-          this.startWorker(rule, task)
-          started += 1
-          rule = this.record(ruleId, {
-            kind: 'claimed', taskId: task.id, message: `worker started for ${task.identifier}`, at: Date.now(),
-          }, preserve ? kept : undefined)
-        } catch (error) {
-          if (!(error instanceof TaskboardError)) throw error
-          // Losing a candidate to a dependency, to another owner, or to a busy development context
-          // says nothing about the rest of the queue. Only a genuine fault ends the round.
-          if (error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
-          else if (CONTENDED_CLAIM_CODES.has(error.code)) contended += 1
-          else throw error
+      while (candidates.length > 0 && started === 0) {
+        for (const task of candidates) {
+          if (started >= slots) break
+          try {
+            this.startWorker(rule, task)
+            started += 1
+            rule = this.record(ruleId, {
+              kind: 'claimed', taskId: task.id, message: `worker started for ${task.identifier}`, at: Date.now(),
+            }, preserve ? kept : undefined)
+          } catch (error) {
+            if (!(error instanceof TaskboardError)) throw error
+            // Losing a candidate to a dependency, to another owner, or to a busy development context
+            // says nothing about the rest of the queue. Only a genuine fault ends the round.
+            if (error.code === 'TASK_DEPENDENCY_INCOMPLETE') dependencyBlocked += 1
+            else if (CONTENDED_CLAIM_CODES.has(error.code)) contended += 1
+            else throw error
+          }
         }
+        if (started > 0 || candidates.length < AUTOMATION_CANDIDATE_PAGE_SIZE) break
+        candidateOffset += candidates.length
+        candidates = this.taskboard.provider.listTasks({
+          projectId: rule.projectId, statuses: ['todo'], limit: AUTOMATION_CANDIDATE_PAGE_SIZE, offset: candidateOffset,
+        })
       }
       if (started > 0) continue
       if (inFlight.size > 0) {

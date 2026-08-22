@@ -8,7 +8,7 @@ import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type {
-  AutomationActor, AutomationRule, TaskboardChangeEvent, TaskboardClaim, TaskboardTask,
+  AutomationActor, AutomationRule, TaskboardChangeEvent, TaskboardClaim, TaskboardTask, WorkflowNode,
 } from '../domain/index.js'
 import { TaskId, TaskboardError } from '../domain/index.js'
 import type { TaskboardAutomationWorker } from '../automation/index.js'
@@ -84,6 +84,29 @@ export function completionResultComment(comments: readonly { readonly body: stri
   return comments.some(item => item.body.trim() !== '') ? 'Ready for review.' : 'Work completed.'
 }
 
+function renderWorkflowNode(node: WorkflowNode, depth: number, branch: string): string[] {
+  const config = Object.keys(node.config).length === 0 ? '' : `; config=${JSON.stringify(node.config)}`
+  const lines = [`${'  '.repeat(depth)}- ${branch}: ${node.kind} [${node.execution}]${config}`]
+  for (const child of node.steps ?? []) lines.push(...renderWorkflowNode(child, depth + 1, 'step'))
+  for (const child of node.trueBranch ?? []) lines.push(...renderWorkflowNode(child, depth + 1, 'true'))
+  for (const child of node.falseBranch ?? []) lines.push(...renderWorkflowNode(child, depth + 1, 'false'))
+  return lines
+}
+
+/** Assigned workflows are durable execution guidance. The editor's executable/design-only marker
+ *  describes registered capabilities; it does not make the scheduler an implicit workflow engine. */
+export function renderWorkflowGuidance(service: TaskboardService, task: TaskboardTask): string {
+  if (task.workflowId === undefined) return '- None'
+  const workflow = service.provider.getWorkflow(task.workflowId)
+  const lines = [`Workflow: ${workflow.name} (guidance-only; nodes are not run automatically)`]
+  for (const tab of workflow.document.tabs) {
+    lines.push(`Tab: ${tab.name}`)
+    lines.push(...renderWorkflowNode(tab.trigger, 1, 'trigger'))
+    for (const node of tab.steps) lines.push(...renderWorkflowNode(node, 1, 'step'))
+  }
+  return lines.join('\n')
+}
+
 /** Render the complete durable task instruction admitted to a worker Session. */
 export function renderTaskInstruction(service: TaskboardService, taskId: string, claim: TaskboardClaim): string {
   const detail = service.provider.getTaskDetail(TaskId(taskId))
@@ -122,6 +145,9 @@ export function renderTaskInstruction(service: TaskboardService, taskId: string,
     '',
     'Relations and dependency state:',
     dependencyLines.length === 0 ? '- None' : dependencyLines.join('\n'),
+    '',
+    'Assigned workflow guidance:',
+    renderWorkflowGuidance(service, detail.task),
     '',
     `Development context: ${development}`,
     '',
@@ -307,7 +333,7 @@ export class HarnessTaskboardWorker implements TaskboardAutomationWorker {
     if (handle === undefined) return
     const task = this.taskboard.provider.getTask(event.taskId)
     if (task.status !== 'in_progress') return
-    handle.agent.followup(createUserMessage({
+    handle.agent.steer(createUserMessage({
       content: [{
         type: 'text',
         text: [
