@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { openTaskSession, taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
@@ -129,7 +129,7 @@ test('snapshot revisions distinguish contiguous updates, missed-event gaps, and 
 test('client change watch uses the plugin Remote carrier and preserves revision results', async () => {
   let request: { endpoint: string; payloadJson: string } | undefined
   const controller = new TaskboardClientController(
-    { hostDescription: { subscribe: () => () => undefined } } as never,
+    { generation: { subscribe: () => () => undefined } } as never,
     {
       mutate: (value: { endpoint: string; payloadJson: string }) => {
         request = value
@@ -156,7 +156,7 @@ test('client change watch uses the plugin Remote carrier and preserves revision 
 test('client mutations use the loopback Connection RPC and never the generic Remote carrier', async () => {
   let call: { channel: string; endpoint: string; payload: unknown } | undefined
   const controller = new TaskboardClientController({
-    hostDescription: { subscribe: () => () => undefined },
+    generation: { subscribe: () => () => undefined },
     rpc: {
       call: (channel: string, endpoint: string, payload: unknown) => {
         call = { channel, endpoint, payload }
@@ -211,7 +211,7 @@ test('historical Session navigation reports a missing persisted Session instead 
 
 test('Taskboard stays open when asynchronous native Session selection fails', async () => {
   const controller = new TaskboardClientController(
-    { hostDescription: { subscribe: () => () => undefined } } as never,
+    { generation: { subscribe: () => () => undefined } } as never,
     {} as never,
     () => Promise.reject(new Error('Session taskboard-missing is unavailable')),
   )
@@ -224,7 +224,7 @@ test('explicit new Session creation carries an unsent task draft and returns the
   let captured: { workspaceId: string; draft: string } | undefined
   let bound: Record<string, unknown> | undefined
   const controller = new TaskboardClientController(
-    { hostDescription: { subscribe: () => () => undefined }, rpc: {
+    { generation: { subscribe: () => () => undefined }, rpc: {
       call: (_channel: string, endpoint: string, payload: Record<string, unknown>) => {
         if (endpoint === 'task.bind-session') bound = payload
         return Promise.resolve({ ok: true, value: {} })
@@ -401,11 +401,28 @@ test('client locale binding follows the Harness language source', () => {
   }
 })
 
-test('client reconnect subscription uses the public Host-description generation and unwinds cleanly', () => {
+test('observeSnapshot keeps prototype methods bound for useSyncExternalStore', () => {
+  class Model {
+    value = 1
+    subscribe(listener: () => void): () => void {
+      void listener
+      return () => undefined
+    }
+    getSnapshot(): { value: number } {
+      return { value: this.value }
+    }
+  }
+  const model = new Model()
+  const unbound = model.getSnapshot
+  assert.throws(() => unbound())
+  assert.deepEqual(observeSnapshot(model).getSnapshot(), { value: 1 })
+})
+
+test('client reconnect subscription uses the connection generation and unwinds cleanly', () => {
   let listener: (() => void) | undefined
   let disposed = 0
   const controller = new TaskboardClientController({
-    hostDescription: {
+    generation: {
       subscribe: (next: () => void) => { listener = next; return () => { disposed += 1 } },
     },
   } as never, {} as never)

@@ -1,4 +1,3 @@
-import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TaskboardSnapshot } from '../service/index.js'
 import { TASK_STATUSES } from '../domain/index.js'
@@ -313,6 +312,35 @@ function watcherId(): string {
   return random?.randomUUID?.() ?? `watcher-${String(Math.trunc(Math.random() * 1e12))}`
 }
 
+/** Connection face used by the page after Harness 0.1.2: generation invalidation plus the dedicated RPC channel. */
+export interface TaskboardConnection {
+  readonly generation: {
+    subscribe(listener: () => void): () => void
+  }
+  readonly rpc: {
+    call(
+      channel: string,
+      endpoint: string,
+      payload: unknown,
+      signal?: AbortSignal,
+    ): Promise<{ ok: true; value: unknown } | { ok: false; error: { code: string; message: string } }>
+  }
+}
+
+/** Bind an observable so `useSyncExternalStore` can take the methods without losing `this`. */
+export function observeSnapshot<T>(source: {
+  subscribe(listener: () => void): () => void
+  getSnapshot(): T
+}): {
+  subscribe(listener: () => void): () => void
+  getSnapshot(): T
+} {
+  return {
+    subscribe: listener => source.subscribe(listener),
+    getSnapshot: () => source.getSnapshot(),
+  }
+}
+
 /** Browser-local page state and route codec; business state always comes from the Host. */
 export class TaskboardClientController {
   private route = parseRoute()
@@ -323,7 +351,7 @@ export class TaskboardClientController {
   private readonly watcherId = watcherId()
 
   constructor(
-    readonly connection: ConnectionHandle,
+    readonly connection: TaskboardConnection,
     private readonly remote: TaskboardRemoteNamespace,
     private readonly selectSession?: (sessionId: string) => void | Promise<void>,
     private readonly createTaskSession?: (workspaceId: string, draft: string) => Promise<string>,
@@ -373,7 +401,7 @@ export class TaskboardClientController {
   }
 
   subscribeConnection(listener: () => void): () => void {
-    return this.connection.hostDescription.subscribe(listener)
+    return this.connection.generation.subscribe(listener)
   }
 
   recordSnapshotRevision(revision: number): RevisionChange {

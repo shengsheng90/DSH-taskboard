@@ -1,7 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode, RefObject } from 'react'
-import type { ClientContext, ISessions, IWorkspaces } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import type { Context } from '@deepseek-ai/cordis'
 import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -15,7 +14,7 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, isPreviewableAttachment, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, TaskboardClientController, tasksForLabel, type TaskListSortKey } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, isPreviewableAttachment, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, TaskboardClientController, tasksForLabel, type TaskboardConnection, type TaskListSortKey } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
@@ -26,10 +25,37 @@ import {
 import taskboardRemote from '../../generated/typert.remote-client.js'
 
 export { bindTaskboardLocale, taskboardStrings } from './locales.js'
-export const inject = ['slots', 'connection', 'sessions', 'workspaces', 'conversation', 'remote', 'locale']
+export const inject = ['slots', 'connection', 'sessions', 'workspaces', 'uiWorkspace', 'conversation', 'remote', 'locale']
 
 interface InjectedProps {
   controller: TaskboardClientController
+}
+
+interface WorkspaceOption {
+  readonly workspaceId: string
+  readonly title: string
+  readonly path: string
+}
+
+interface IWorkspaces {
+  readonly list: {
+    subscribe(listener: () => void): () => void
+    getSnapshot(): { readonly items: readonly WorkspaceOption[] }
+  }
+}
+
+interface ISessions {
+  readonly list: {
+    getSnapshot(): { readonly current?: string; readonly byId: Readonly<Record<string, unknown>> }
+    subscribe(listener: () => void): () => void
+  }
+  refresh(): Promise<void>
+  open(sessionId: string): void
+  scope(sessionId: string): unknown
+}
+
+interface UiWorkspace {
+  connectWorkspace(workspaceId: string): Promise<string>
 }
 
 interface PageInjectedProps extends InjectedProps {
@@ -54,14 +80,11 @@ export async function openTaskSession(navigator: TaskSessionNavigator, sessionId
 
 /** Narrow structural face used at the plugin boundary; the service is provided by dsh-client-ui-conversation. */
 interface ConversationDraftPort {
-  readonly input: { for(ctx: ClientContext): { setDraft(text: string): void } }
+  readonly input: { for(ctx: unknown): { setDraft(text: string): void } }
 }
 
 type NavProps = PropsRuntime<'sidebar.footer.action'> & InjectedProps
 type PageProps = PropsRuntime<'shell.overlay'> & PageInjectedProps
-type WorkspaceOption = IWorkspaces['list']['getSnapshot'] extends () => infer State
-  ? State extends { items: readonly (infer Item)[] } ? Item : never
-  : never
 
 function useStrings(): TaskboardCopy {
   return taskboardStrings(useSyncExternalStore(subscribeTaskboardLocale, currentTaskboardLanguage, currentTaskboardLanguage))
@@ -289,10 +312,11 @@ function useFrameInsets(ref: RefObject<HTMLDivElement | null>, active: boolean):
 
 export function TaskboardPage({ controller, workspaces }: PageProps) {
   const route = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
+  const workspaceList = useMemo(() => observeSnapshot(workspaces.list), [workspaces])
   const workspaceState = useSyncExternalStore(
-    workspaces.list.subscribe,
-    workspaces.list.getSnapshot,
-    workspaces.list.getSnapshot,
+    workspaceList.subscribe,
+    workspaceList.getSnapshot,
+    workspaceList.getSnapshot,
   )
   const root = useRef<HTMLDivElement>(null)
   const insets = useFrameInsets(root, route.open)
@@ -1535,33 +1559,30 @@ function MarkdownInlines({ nodes }: { nodes: readonly MarkdownInline[] }) {
 }
 
 /** Browser plugin registration; generated Remote contribution and both slots unwind together. */
-export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
-  const connection = ctx.get('connection') as unknown as ConnectionHandle
+export async function apply(ctx: Context): Promise<() => Promise<void>> {
+  const connection = ctx.get('connection') as unknown as TaskboardConnection
   const remote = ctx.get('remote') as unknown as TypertClientRemote
   const locale = ctx.get('locale') as unknown as TaskboardLocaleRuntime
   const unbindLocale = bindTaskboardLocale(locale)
   const unregisterCopy = locale.register(TASKBOARD_LOCALE_NS, taskboardLocales)
   const unmountRemote = await remote.$mount(taskboardRemote)
-  ctx.inject(['remote.taskboard'], (remoteCtx) => {
+  ctx.inject(['remote.taskboard', 'uiWorkspace'], (remoteCtx) => {
     const sessions = remoteCtx.get('sessions') as unknown as ISessions
     const workspaces = remoteCtx.get('workspaces') as unknown as IWorkspaces
+    const uiWorkspace = remoteCtx.get('uiWorkspace') as unknown as UiWorkspace
     const conversation = remoteCtx.get('conversation') as unknown as ConversationDraftPort
     const mountedRemote = remoteCtx.get('remote') as unknown as TypertClientRemote
-    const refreshSessions = (sessions as unknown as { refresh?: () => Promise<void> }).refresh
     const sessionNavigator: TaskSessionNavigator = {
-      list: sessions.list as unknown as TaskSessionNavigator['list'],
-      refresh: async () => {
-        if (refreshSessions === undefined) throw new Error('Native Session list refresh is unavailable')
-        await refreshSessions.call(sessions)
-      },
-      open: sessionId => { sessions.open(sessionId as never) },
+      list: { getSnapshot: () => sessions.list.getSnapshot() },
+      refresh: () => sessions.refresh(),
+      open: sessionId => { sessions.open(sessionId) },
     }
     const controller = new TaskboardClientController(
       connection,
       mountedRemote.taskboard,
       sessionId => openTaskSession(sessionNavigator, sessionId),
       async (workspaceId, draft) => {
-        const sessionId = await workspaces.connectWorkspace(workspaceId as never)
+        const sessionId = await uiWorkspace.connectWorkspace(workspaceId)
         const scoped = sessions.scope(sessionId)
         if (scoped === undefined) throw new Error(`Unable to resolve the new Session ${sessionId}`)
         conversation.input.for(scoped).setDraft(draft)

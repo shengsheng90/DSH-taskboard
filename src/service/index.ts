@@ -1,8 +1,6 @@
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { Config } from '../index.js'
 import {
   AutomationId, ProjectId, TaskId, TaskboardError, parseTaskStatus,
@@ -17,6 +15,7 @@ import type {
 import { SqliteTaskboardProvider } from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 declare module '@deepseek-ai/cordis' {
@@ -76,6 +75,16 @@ export interface TaskboardSnapshot {
   }
   readonly storageHealth: TaskboardStorageHealth
 }
+
+type RpcResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: { readonly code: string; readonly message: string; readonly details: object } }
+
+type TaskboardRpcHandler = (
+  endpoint: string,
+  payload: unknown,
+  signal: AbortSignal,
+) => Promise<RpcResult<unknown>>
 
 type RpcPayload = Record<string, unknown>
 
@@ -252,16 +261,15 @@ export class TaskboardService extends TypertRemoteService {
       }
     }, 'taskboard: revision long-poll lifecycle')
     ctx.inject(['connection'], (connectionCtx) => {
-      const handler: ConnectionRpcHandler = (endpoint, payload) => endpoint === 'automation.run-now'
+      const handler: TaskboardRpcHandler = (endpoint, payload) => endpoint === 'automation.run-now'
         ? this.dispatchAutomationRunNow(payload)
         : Promise.resolve(this.dispatchHumanRpc(endpoint, payload, human('human:web-client')))
+      const rpc = connectionCtx.connection.rpc as unknown as {
+        handle(channel: string, handler: TaskboardRpcHandler): () => Promise<void>
+      }
       connectionCtx.effect(
-        () => connectionCtx.connection.rpc.handle(
-          '/taskboard',
-          handler,
-          { authority: 'loopback' },
-        ),
-        'taskboard: loopback Client RPC',
+        () => rpc.handle('/taskboard', handler),
+        'taskboard: Client RPC',
       )
     })
     ctx.inject(['webServer'], (webCtx) => {
@@ -401,9 +409,10 @@ export class TaskboardService extends TypertRemoteService {
         return { ok: false, errorCode: error instanceof TaskboardError ? error.code : 'internal', errorMessage: message }
       }
     }
-    // Typert Remotes are reachable through non-loopback browser transports. Keep this legacy
-    // carrier read-only: every human mutation, attachment ticket, and immediate automation run
-    // must cross the Connection RPC channel registered with `authority: 'loopback'` above.
+    // Typert Remotes are reachable through any authenticated browser transport. Keep this
+    // carrier read-only: every human mutation, attachment ticket, and immediate automation
+    // run must cross the dedicated `/taskboard` Connection RPC channel above. Connection
+    // owns browserAuth / trustedHosts; this plugin no longer passes a per-channel authority.
     return {
       ok: false,
       errorCode: 'loopback-required',
