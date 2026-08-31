@@ -54,6 +54,11 @@ interface ISessions {
   scope(sessionId: string): unknown
 }
 
+interface ISlots {
+  inject(key: string, callback: () => unknown): unknown
+  register(options: { name: string; id: string }, component: unknown): unknown
+}
+
 interface UiWorkspace {
   connectWorkspace(workspaceId: string): Promise<string>
 }
@@ -1603,10 +1608,11 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       }
     })
     remoteCtx.effect(() => () => { controller.dispose(); offSessions() }, 'taskboard client controller')
+    const slots = remoteCtx.get('slots') as ISlots
     const Nav = (props: PropsRuntime<'sidebar.footer.action'>) => <TaskboardNavButton {...props} controller={controller} />
     const Page = (props: PropsRuntime<'shell.overlay'>) => <TaskboardPage {...props} controller={controller} workspaces={workspaces} />
-    remoteCtx.slots.inject('sidebar.footer.action', () => remoteCtx.slots.register({ name: 'sidebar.footer.action', id: 'taskboard.navigation' }, Nav))
-    remoteCtx.slots.inject('shell.overlay', () => remoteCtx.slots.register({ name: 'shell.overlay', id: 'taskboard.page' }, Page))
+    slots.inject('sidebar.footer.action', () => slots.register({ name: 'sidebar.footer.action', id: 'taskboard.navigation' }, Nav))
+    slots.inject('shell.overlay', () => slots.register({ name: 'shell.overlay', id: 'taskboard.page' }, Page))
   })
   return async () => {
     unbindLocale()

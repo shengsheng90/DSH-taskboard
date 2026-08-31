@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ProjectId, TaskId, TaskboardError } from '../domain/index.js'
 import type { AgentActor, RelationKind, TaskStatus } from '../domain/index.js'
 import type { TaskboardService } from '../service/index.js'
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 const JSON_OUTPUT = {
   schema: { type: 'json' as const },
