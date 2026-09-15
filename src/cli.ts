@@ -3,8 +3,10 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
-  AutomationId, CommentId, ProjectId, SqliteTaskboardProvider, TASKBOARD_SCHEMA_VERSION, TaskId, TaskboardError,
-  WorkflowNodeRegistry, parseTaskStatus,
+  AutomationId, CommentId, DEFAULT_TASKBOARD_ATTACHMENT_ROOT, DEFAULT_TASKBOARD_DATABASE_PATH,
+  ProjectId, resolveTaskboardStorage, SqliteTaskboardProvider, TASKBOARD_SCHEMA_VERSION, TaskId,
+  TaskboardError, WorkflowNodeRegistry, parseTaskStatus, taskboardStorageLog,
+  writeTaskboardStorageIgnore, type TaskboardStorageLayout,
 } from './index.js'
 import type {
   AutomationRuleConfig, AutomationState, CreateTaskRequest, FreshClaimRequest, HumanActor, RelationKind, TaskStatus,
@@ -107,6 +109,16 @@ function usage(): string {
   ].join('\n')
 }
 
+/**
+ * The CLI runs once per command and its stdout is a JSON contract, so diagnostics go to stderr and
+ * stay quiet for a store that was merely reopened. A database this call had to create, or a cwd
+ * with no project behind it, is what an operator has to be told about.
+ */
+function emitStorageDiagnostics(io: CliIo, layout: TaskboardStorageLayout): void {
+  if (layout.baseSource !== 'user-data' && layout.database.existed) return
+  for (const line of taskboardStorageLog(layout)) io.stderr(`${line}\n`)
+}
+
 /** Run one versioned JSON CLI command without triggering a model turn. */
 export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
   const args = [...argv]
@@ -128,12 +140,19 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     io.stderr(errorOutput(error))
     return CLI_EXIT_USAGE
   }
-  const database = options.get('database') ?? process.env['DSH_TASKBOARD_DATABASE'] ?? '.dsh/taskboard.sqlite'
-  const attachmentRoot = options.get('attachment-root') ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT'] ?? '.dsh/taskboard-attachments'
+  const layout = resolveTaskboardStorage(
+    options.get('database') ?? process.env['DSH_TASKBOARD_DATABASE'] ?? DEFAULT_TASKBOARD_DATABASE_PATH,
+    // `DSH_TASKBOARD_ATTACHMENTS` is the name the Host plugin and both READMEs use. The older
+    // `DSH_TASKBOARD_ATTACHMENT_ROOT` this CLI shipped with keeps working.
+    options.get('attachment-root')
+      ?? process.env['DSH_TASKBOARD_ATTACHMENTS']
+      ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT']
+      ?? DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
+  )
   let provider: SqliteTaskboardProvider
   try {
-    provider = new SqliteTaskboardProvider(database, {
-      root: attachmentRoot,
+    provider = new SqliteTaskboardProvider(layout.database.path, {
+      root: layout.attachments.path,
       maxAttachmentBytes: positiveInteger(options, 'max-attachment-bytes', 25 * 1024 * 1024),
       maxTaskAttachmentBytes: positiveInteger(options, 'max-task-attachment-bytes', 100 * 1024 * 1024),
       allowedContentTypes: (options.get('allowed-content-types')
@@ -145,6 +164,9 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     io.stderr(errorOutput(error))
     return CLI_EXIT_UNAVAILABLE
   }
+  // Only after the store is open: the report has to describe what exists, not what was intended.
+  emitStorageDiagnostics(io, layout)
+  writeTaskboardStorageIgnore(layout)
   try {
     const actor = human(options)
     const workflowNodes = new WorkflowNodeRegistry()
@@ -314,8 +336,9 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     } else if (group === 'storage' && command === 'status') {
       const cleanup = provider.retryAttachmentCleanup()
       value = {
-        database,
-        attachmentRoot,
+        // Strings, as `storage status` has always reported them, now always absolute.
+        database: layout.database.path,
+        attachmentRoot: layout.attachments.path,
         ...provider.storageHealth(),
         attachmentCleanup: cleanup,
       }

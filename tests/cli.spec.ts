@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -154,4 +154,105 @@ test('CLI task creation refuses a status the lifecycle does not own', t => {
 
   assert.equal(cli(['task', 'create', '--project', project.id, '--title', 'Allowed', '--status', 'todo']).code, 0)
   assert.equal((JSON.parse(cli(['task', 'list', '--project', project.id]).stdout).value as unknown[]).length, 1)
+})
+
+test('CLI logs the absolute path when it creates a new database and stays quiet on reopen', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-cli-create-log-'))
+  t.after(() => { rmSync(directory, { recursive: true, force: true }) })
+  const database = join(directory, 'taskboard.sqlite')
+  const invoke = (): { code: number; stderr: string } => {
+    let stdout = ''
+    let stderr = ''
+    const code = runTaskboardCli(['--database', database, 'storage', 'status'], {
+      stdout: value => { stdout += value }, stderr: value => { stderr += value },
+    })
+    return { code, stderr }
+  }
+  const created = invoke()
+  assert.equal(created.code, 0)
+  assert.ok(created.stderr.includes(`taskboard database created at ${database}`))
+  const reopened = invoke()
+  assert.equal(reopened.code, 0)
+  assert.equal(reopened.stderr.includes('created at'), false)
+})
+
+/** Start the CLI from `cwd` with its default relative paths, the way an inherited cwd would. */
+function cliFrom(cwd: string, dshHome: string | undefined, args: string[], t: { after(fn: () => void): void }): {
+  code: number
+  stdout: string
+  stderr: string
+} {
+  const previousCwd = process.cwd()
+  const previousHome = process.env['DSH_HOME']
+  t.after(() => {
+    process.chdir(previousCwd)
+    if (previousHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = previousHome
+  })
+  if (dshHome === undefined) delete process.env['DSH_HOME']
+  else process.env['DSH_HOME'] = dshHome
+  process.chdir(cwd)
+  let stdout = ''
+  let stderr = ''
+  const code = runTaskboardCli(args, {
+    stdout: value => { stdout += value }, stderr: value => { stderr += value },
+  })
+  return { code, stdout, stderr }
+}
+
+test('CLI started outside a project leaves that directory alone', t => {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-nonproject-')))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-home-')))
+  t.after(() => {
+    rmSync(cwd, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  })
+  const result = cliFrom(cwd, join(home, '.dsh'), ['storage', 'status'], t)
+
+  assert.equal(result.code, 0)
+  assert.equal(JSON.parse(result.stdout).schemaVersion, 1)
+  // The startup directory is inherited, never chosen: nothing may be created in it.
+  assert.equal(existsSync(join(cwd, '.dsh')), false)
+  assert.equal(existsSync(join(home, '.dsh/taskboard.sqlite')), true)
+  assert.match(result.stderr, /taskboard cwd is not a git project/)
+  assert.ok(result.stderr.includes(`taskboard database created at ${join(home, '.dsh/taskboard.sqlite')}`))
+})
+
+test('CLI started below a project root stores the board at that root and keeps it out of git', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-project-')))
+  t.after(() => { rmSync(root, { recursive: true, force: true }) })
+  mkdirSync(join(root, '.git'))
+  const nested = join(root, 'src/sqlite')
+  mkdirSync(nested, { recursive: true })
+  const result = cliFrom(nested, undefined, ['storage', 'status'], t)
+
+  assert.equal(result.code, 0)
+  assert.equal(existsSync(join(root, '.dsh/taskboard.sqlite')), true)
+  assert.equal(existsSync(join(nested, '.dsh')), false)
+  assert.match(readFileSync(join(root, '.dsh/.gitignore'), 'utf8'), /^#[^\n]*\n\*\n$/)
+  assert.equal(result.stderr.includes('not a git project'), false)
+})
+
+test('CLI marks a store that an earlier version left in a project', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-legacy-')))
+  t.after(() => { rmSync(root, { recursive: true, force: true }) })
+  mkdirSync(join(root, '.git'))
+  // What an earlier version left behind: a store resolved against the startup directory.
+  const database = join(root, '.dsh/taskboard.sqlite')
+  const quiet = { stdout: (): void => {}, stderr: (): void => {} }
+  const seeded = runTaskboardCli([
+    '--database', database, '--attachment-root', join(root, '.dsh/taskboard-attachments'),
+    'project', 'create', '--key', 'OLD', '--name', 'Legacy',
+  ], quiet)
+  assert.equal(seeded, 0)
+  assert.equal(existsSync(join(root, '.dsh/.gitignore')), false)
+
+  const result = cliFrom(root, undefined, ['storage', 'status'], t)
+  assert.equal(result.code, 0)
+  const status = JSON.parse(result.stdout).value as { database: string; projectCount: number }
+  // The store is reused where it is, and only now gets its marker.
+  assert.equal(status.database, database)
+  assert.equal(status.projectCount, 1)
+  assert.match(readFileSync(join(root, '.dsh/.gitignore'), 'utf8'), /^#[^\n]*\n\*\n$/)
+  assert.equal(result.stderr.includes('created at'), false)
 })

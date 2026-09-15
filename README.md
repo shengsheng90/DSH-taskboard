@@ -201,12 +201,14 @@ All of these must pass:
 | Harness boot log | no plugin import / apply error |
 | Browser | refresh `http://127.0.0.1:<port>`; a Taskboard control appears in the sidebar footer |
 
-Default data files (created on first use, Host-resolved paths):
+Default data files (created on first use; the Host resolves these paths):
 
 ```text
 .dsh/taskboard.sqlite
 .dsh/taskboard-attachments
 ```
+
+Those defaults are **relative**, and a Host inherits its working directory from whatever started it, so they are never resolved against a raw process cwd. They bind to the nearest git project above the startup directory; configuration directories are not projects, so a versioned `~/.claude` or `~/.config/...` is skipped rather than written into. With no project behind the startup directory the store goes to `$DSH_HOME` (default `~/.dsh`) instead of dropping a `.dsh/` folder where nobody asked for one. An existing cwd-relative database is kept, so stores created before this rule are not abandoned, and a project-local store gets a `.dsh/.gitignore` so it stays out of `git status`. The Host logs the resolved absolute paths on startup, plus `taskboard database created at <abs path>` when it initializes a new one. Absolute values, including absolute `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`, are used as given. See [Configuration](#configuration), and [Upgrading from a cwd-relative store](#upgrading-from-a-cwd-relative-store) if you ran an earlier version.
 
 ### Install troubleshooting
 
@@ -322,10 +324,21 @@ Assigning a saved workflow adds its ordered tabs, branches, node kinds, and conf
 
 `cordis.patch.yml` mounts one Host plugin id `taskboard`. Override values in the profile composition or with environment variables. Paths are resolved by the Host. The browser cannot choose the database or attachment root.
 
+Relative `databasePath` / `attachmentRoot` values are **cwd-independent**. Both are resolved together against one base, so the authority rows and the attachment bytes can never end up in different directories:
+
+1. `:memory:` and absolute paths are used as given.
+2. If the cwd-relative database already exists, that location is kept. A store created before this rule is never abandoned. When only `attachmentRoot` is relative, it anchors this step instead, so bytes an absolute database points at are not orphaned.
+3. Otherwise the base is the nearest git project above the process cwd: walk up until a directory contains `.git`, skipping roots that hold configuration rather than work — the home directory itself, anything above it, and dot-directories inside it such as `~/.claude` or `~/.config/nvim`. A project-local store also receives a `.dsh/.gitignore` (an existing one is left alone), so it never appears in the project's `git status`.
+4. If no project is found, files go under `$DSH_HOME` (default `~/.dsh`), using the configured basename — for the defaults, `~/.dsh/taskboard.sqlite` and `~/.dsh/taskboard-attachments`.
+
+Rule 3 is deliberate: a Host started inside any git project gets a store in that project, because the board is project-local by design. A Host that must always serve one board should pin it with an absolute path rather than rely on where it was started.
+
+Set `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` to an absolute path (or pass `--database` / `--attachment-root` to the CLI) to force a location; a relative value follows the same four rules. The Host logs the resolved absolute paths on startup, and `taskboard database created at <abs path>` when it initializes a new database. The CLI writes the same lines to stderr, but only when it had to create a database or fell back to `$DSH_HOME` — its stdout stays a pure JSON contract. `dsh-taskboard storage status` reports both resolved paths.
+
 | Key | Default | Notes |
 |---|---|---|
-| `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE` |
-| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS` |
+| `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE`. Relative values follow the git-root / `$DSH_HOME` rules above; they are not resolved against a raw process cwd. |
+| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`. Same resolution rules as `databasePath`, against the same base. The CLI also accepts the older `DSH_TASKBOARD_ATTACHMENT_ROOT`. |
 | `pageSize` | `100` | Bounded `taskboard_list` page; the result reports the matching total |
 | `snapshotTaskLimit` | `1000` | Tasks per web snapshot; the page reports when it was truncated |
 | `maxAttachmentBytes` | `26214400` | Per file (25 MiB) |
@@ -346,6 +359,24 @@ The SQLite integrity scan reads every database page, so it never runs on the sna
 While the page is open, the plugin waits on the next committed global revision over the existing Typert connection. Timeout polling and periodic snapshots are recovery paths. This does not require changing the Harness Host-event allowlist.
 
 Backup both the SQLite file (and WAL, if live) and the attachment directory. For a consistent offline backup, stop Harness first.
+
+### Upgrading from a cwd-relative store
+
+Earlier versions resolved the defaults against `process.cwd()`. Nothing has to be migrated: the schema is unchanged, and rule 2 above keeps any store that already sits in the startup directory, including one under a configuration directory. A store only moves when the database it anchors on does not exist, which is when there is nothing to lose. A kept store that git can see also picks up the `.dsh/.gitignore` marker on the next start.
+
+What the upgrade does not do is clean up after the old behaviour. Empty `.dsh/` directories that earlier versions dropped in unrelated startup directories stay where they are. Find them:
+
+```sh
+find ~ -type f -path '*/.dsh/taskboard.sqlite' 2>/dev/null
+```
+
+Read each one. `projectCount`, `taskCount` and `attachmentCount` all zero means an empty shell:
+
+```sh
+dsh-taskboard --database <absolute path> storage status
+```
+
+Delete the empty ones. Keep the store you use where it is, since it is reused, or move it and pin it with `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`. Move the attachment directory together with the database: attachment rows hold keys relative to the attachment root and the database records no absolute path, so the pair travels anywhere but the halves do not. There is no import or merge, so two stores cannot be combined into one.
 
 ## Develop this repository
 

@@ -1,4 +1,3 @@
-import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Config } from '../index.js'
@@ -12,7 +11,13 @@ import type {
   TaskboardStorageHealth, UpdateProjectRequest, UpdateTaskRequest,
   WorkflowCatalogEntry, WorkflowDocument,
 } from '../domain/index.js'
-import { SqliteTaskboardProvider } from '../sqlite/index.js'
+import {
+  resolveTaskboardStorage,
+  SqliteTaskboardProvider,
+  taskboardStorageLog,
+  writeTaskboardStorageIgnore,
+  type TaskboardStorageLayout,
+} from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -179,9 +184,11 @@ function resolveAutomationDefaults(
   }
 }
 
-function resolved(config: Config): ResolvedTaskboardConfig {
-  const databasePath = config.databasePath === ':memory:' ? ':memory:' : resolve(config.databasePath)
-  const attachmentRoot = resolve(config.attachmentRoot)
+function logStorageResolution(ctx: Context, layout: TaskboardStorageLayout): void {
+  for (const line of taskboardStorageLog(layout)) ctx.logger.info(line)
+}
+
+function resolved(config: Config, databasePath: string, attachmentRoot: string): ResolvedTaskboardConfig {
   const maxAttachmentBytes = config.maxAttachmentBytes ?? 25 * 1024 * 1024
   const maxTaskAttachmentBytes = config.maxTaskAttachmentBytes ?? 100 * 1024 * 1024
   if (maxTaskAttachmentBytes < maxAttachmentBytes) {
@@ -238,7 +245,8 @@ export class TaskboardService extends TypertRemoteService {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'taskboard')
     this.hostCtx = ctx
-    this.config = resolved(config)
+    const storage = resolveTaskboardStorage(config.databasePath, config.attachmentRoot)
+    this.config = resolved(config, storage.database.path, storage.attachments.path)
     this.provider = new SqliteTaskboardProvider(this.config.databasePath, {
       root: this.config.attachmentRoot,
       maxAttachmentBytes: this.config.maxAttachmentBytes,
@@ -246,6 +254,10 @@ export class TaskboardService extends TypertRemoteService {
       allowedContentTypes: this.config.allowedAttachmentTypes,
       allowSharedWorktrees: this.config.allowSharedWorktrees,
     })
+    // Report the store only once it is actually open: a log line must never claim a database
+    // that failed to initialize.
+    logStorageResolution(ctx, storage)
+    writeTaskboardStorageIgnore(storage)
     this.lastRevision = this.provider.globalRevision()
     this.attachmentRoutes = new TaskboardAttachmentRoutes(this.provider)
     ctx.effect(() => () => { this.provider.close() }, 'taskboard: close SQLite authority')
