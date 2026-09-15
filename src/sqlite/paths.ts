@@ -202,28 +202,35 @@ export function taskboardStorageLog(layout: TaskboardStorageLayout): string[] {
 }
 
 /**
- * Keep a project-local store out of the operator's `git status`. Only an existing dot-directory
- * below the project root is marked — never the project root, never a directory the project also
- * uses for source — and an existing `.gitignore` is left alone. Returns the files written.
+ * Keep a store out of the operator's `git status`. Only an existing dot-directory below the base
+ * is marked — never the base itself, never a directory the project also uses for source — and an
+ * existing `.gitignore` is left alone. Returns the files written.
+ *
+ * Any base git can see qualifies, not only a project root: a store kept by the `existing` rule
+ * predates the project-local behaviour and is exactly the one already sitting in someone's
+ * working tree. `$DSH_HOME` is not version controlled, so it is skipped.
  */
 export function writeTaskboardStorageIgnore(
   layout: TaskboardStorageLayout,
   options: WriteTaskboardStorageIgnoreOptions = {},
 ): string[] {
   const base = layout.base
-  if (layout.baseSource !== 'git-root' || base === undefined) return []
+  if (base === undefined || layout.baseSource === 'user-data') return []
   const exists = options.exists ?? existsSync
   const write = options.write ?? ((path, content) => { writeFileSync(path, content, { flag: 'wx' }) })
+  const gitRoot = layout.baseSource === 'git-root' ? base : findGitRoot(base, exists)
+  if (gitRoot === undefined) return []
   const directories = new Set<string>()
   for (const entry of [layout.database, layout.attachments]) {
-    if (entry.source !== 'git-root') continue
+    if (entry.source === 'memory' || entry.source === 'absolute') continue
     const head = entry.configured.split(/[/\\]/)[0]
     if (head === undefined || !head.startsWith('.') || head === '.' || head === '..') continue
     directories.add(resolve(base, head))
   }
   const written: string[] = []
   for (const directory of directories) {
-    if (directory === base || !contains(base, directory) || !exists(directory)) continue
+    if (directory === base || !contains(base, directory) || !contains(gitRoot, directory)) continue
+    if (!exists(directory)) continue
     const marker = join(directory, '.gitignore')
     if (exists(marker)) continue
     try {

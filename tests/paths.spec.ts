@@ -165,12 +165,31 @@ test('never writes an ignore marker outside a dedicated directory', () => {
   assert.equal(shared.baseSource, 'git-root')
   assert.deepEqual(writeTaskboardStorageIgnore(shared, onDisk), [])
 
+  // `$DSH_HOME` is not version controlled.
   const fallback = layoutAt(join(HOME, 'Downloads'), [])
   assert.deepEqual(writeTaskboardStorageIgnore(fallback, { exists: () => true, write: () => {} }), [])
+})
 
+test('marks a store that predates the project-local rule, where git can see it', () => {
+  // A store kept by the `existing` rule is the one already sitting in someone's working tree,
+  // so it is exactly the store that needs the marker most.
   const cwd = join(HOME, '.claude')
   const kept = layoutAt(cwd, [join(cwd, DATABASE)])
-  assert.deepEqual(writeTaskboardStorageIgnore(kept, { exists: () => true, write: () => {} }), [])
+  assert.equal(kept.baseSource, 'existing')
+
+  assert.deepEqual(
+    writeTaskboardStorageIgnore(kept, {
+      exists: path => path === join(cwd, '.git') || path === join(cwd, '.dsh'),
+      write: () => {},
+    }),
+    [join(cwd, '.dsh/.gitignore')],
+  )
+
+  // Nothing version controlled above the store: a marker there would say nothing to anyone.
+  assert.deepEqual(
+    writeTaskboardStorageIgnore(kept, { exists: path => path === join(cwd, '.dsh'), write: () => {} }),
+    [],
+  )
 })
 
 test('resolving a store never creates anything on disk', t => {

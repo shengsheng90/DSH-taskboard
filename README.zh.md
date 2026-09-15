@@ -208,7 +208,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 .dsh/taskboard-attachments
 ```
 
-这些默认值是**相对路径**。Host 的工作目录是从启动它的进程继承来的，所以它们不会按进程 cwd 解析：它们绑定到启动目录往上最近的 git 项目；配置目录不算项目，纳入版本管理的 `~/.claude`、`~/.config/...` 会被跳过，而不是被写进去。启动目录背后没有项目时，数据落到 `$DSH_HOME`（默认 `~/.dsh`），不会在没人指定的目录里建 `.dsh/`。cwd 相对路径上已经存在的数据库会继续沿用，之前建好的库不会被丢下；项目内的库还会附带一个 `.dsh/.gitignore`，不出现在 `git status` 里。Host 启动时把解析后的绝对路径写进日志，新建库时还有一行 `taskboard database created at <abs path>`。绝对路径（包括绝对的 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`）按原样使用。详见 [配置](#配置)。
+这些默认值是**相对路径**。Host 的工作目录是从启动它的进程继承来的，所以它们不会按进程 cwd 解析：它们绑定到启动目录往上最近的 git 项目；配置目录不算项目，纳入版本管理的 `~/.claude`、`~/.config/...` 会被跳过，而不是被写进去。启动目录背后没有项目时，数据落到 `$DSH_HOME`（默认 `~/.dsh`），不会在没人指定的目录里建 `.dsh/`。cwd 相对路径上已经存在的数据库会继续沿用，之前建好的库不会被丢下；项目内的库还会附带一个 `.dsh/.gitignore`，不出现在 `git status` 里。Host 启动时把解析后的绝对路径写进日志，新建库时还有一行 `taskboard database created at <abs path>`。绝对路径（包括绝对的 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`）按原样使用。详见 [配置](#配置)；用过旧版本的话另见 [从 cwd 相对库升级](#从-cwd-相对库升级)。
 
 ### 安装排错
 
@@ -357,6 +357,24 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 页面打开期间，插件通过现有 Typert 连接等待下一次已提交的全局 revision。超时轮询和周期 snapshot 是恢复路径。这不要求修改 Harness 的 Host 事件白名单。
 
 备份时同时带上 SQLite（若在线还含 WAL）和附件目录。要做一致的离线备份，先停 Harness。
+
+### 从 cwd 相对库升级
+
+旧版本把默认值按 `process.cwd()` 解析。升级不需要迁移：schema 没变，上面的第 2 条会保留任何已经落在启动目录里的库，包括落在配置目录里的那些。只有当作为锚点的数据库不存在时位置才会变，而那种情况本来就没有数据可丢。已经保留下来、又在 git 工作区里的库，下次启动会补上 `.dsh/.gitignore`。
+
+升级不会替你清理旧行为留下的东西：旧版本撒在各个启动目录里的空 `.dsh/` 还在原地。先找出来：
+
+```sh
+find ~ -type f -path '*/.dsh/taskboard.sqlite' 2>/dev/null
+```
+
+逐个读一下，`projectCount`、`taskCount`、`attachmentCount` 全是 0 的就是空壳：
+
+```sh
+dsh-taskboard --database <绝对路径> storage status
+```
+
+空壳删掉。还在用的那个可以留在原地（会被自动沿用），也可以搬走之后用 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` 钉死。搬的时候数据库和附件目录要一起搬：附件行里存的是相对附件根的 key，数据库本身不记录任何绝对路径，所以两者作为一个整体可以随便搬，拆开就不行。没有导入或合并功能，两个库合不成一个。
 
 ## 开发本仓库
 

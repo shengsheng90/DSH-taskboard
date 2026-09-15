@@ -208,7 +208,7 @@ Default data files (created on first use; the Host resolves these paths):
 .dsh/taskboard-attachments
 ```
 
-Those defaults are **relative**, and a Host inherits its working directory from whatever started it, so they are never resolved against a raw process cwd. They bind to the nearest git project above the startup directory; configuration directories are not projects, so a versioned `~/.claude` or `~/.config/...` is skipped rather than written into. With no project behind the startup directory the store goes to `$DSH_HOME` (default `~/.dsh`) instead of dropping a `.dsh/` folder where nobody asked for one. An existing cwd-relative database is kept, so stores created before this rule are not abandoned, and a project-local store gets a `.dsh/.gitignore` so it stays out of `git status`. The Host logs the resolved absolute paths on startup, plus `taskboard database created at <abs path>` when it initializes a new one. Absolute values, including absolute `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`, are used as given. See [Configuration](#configuration).
+Those defaults are **relative**, and a Host inherits its working directory from whatever started it, so they are never resolved against a raw process cwd. They bind to the nearest git project above the startup directory; configuration directories are not projects, so a versioned `~/.claude` or `~/.config/...` is skipped rather than written into. With no project behind the startup directory the store goes to `$DSH_HOME` (default `~/.dsh`) instead of dropping a `.dsh/` folder where nobody asked for one. An existing cwd-relative database is kept, so stores created before this rule are not abandoned, and a project-local store gets a `.dsh/.gitignore` so it stays out of `git status`. The Host logs the resolved absolute paths on startup, plus `taskboard database created at <abs path>` when it initializes a new one. Absolute values, including absolute `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`, are used as given. See [Configuration](#configuration), and [Upgrading from a cwd-relative store](#upgrading-from-a-cwd-relative-store) if you ran an earlier version.
 
 ### Install troubleshooting
 
@@ -359,6 +359,24 @@ The SQLite integrity scan reads every database page, so it never runs on the sna
 While the page is open, the plugin waits on the next committed global revision over the existing Typert connection. Timeout polling and periodic snapshots are recovery paths. This does not require changing the Harness Host-event allowlist.
 
 Backup both the SQLite file (and WAL, if live) and the attachment directory. For a consistent offline backup, stop Harness first.
+
+### Upgrading from a cwd-relative store
+
+Earlier versions resolved the defaults against `process.cwd()`. Nothing has to be migrated: the schema is unchanged, and rule 2 above keeps any store that already sits in the startup directory, including one under a configuration directory. A store only moves when the database it anchors on does not exist, which is when there is nothing to lose. A kept store that git can see also picks up the `.dsh/.gitignore` marker on the next start.
+
+What the upgrade does not do is clean up after the old behaviour. Empty `.dsh/` directories that earlier versions dropped in unrelated startup directories stay where they are. Find them:
+
+```sh
+find ~ -type f -path '*/.dsh/taskboard.sqlite' 2>/dev/null
+```
+
+Read each one. `projectCount`, `taskCount` and `attachmentCount` all zero means an empty shell:
+
+```sh
+dsh-taskboard --database <absolute path> storage status
+```
+
+Delete the empty ones. Keep the store you use where it is, since it is reused, or move it and pin it with `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`. Move the attachment directory together with the database: attachment rows hold keys relative to the attachment root and the database records no absolute path, so the pair travels anywhere but the halves do not. There is no import or merge, so two stores cannot be combined into one.
 
 ## Develop this repository
 

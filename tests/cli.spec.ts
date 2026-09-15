@@ -232,3 +232,27 @@ test('CLI started below a project root stores the board at that root and keeps i
   assert.match(readFileSync(join(root, '.dsh/.gitignore'), 'utf8'), /^#[^\n]*\n\*\n$/)
   assert.equal(result.stderr.includes('not a git project'), false)
 })
+
+test('CLI marks a store that an earlier version left in a project', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-legacy-')))
+  t.after(() => { rmSync(root, { recursive: true, force: true }) })
+  mkdirSync(join(root, '.git'))
+  // What an earlier version left behind: a store resolved against the startup directory.
+  const database = join(root, '.dsh/taskboard.sqlite')
+  const quiet = { stdout: (): void => {}, stderr: (): void => {} }
+  const seeded = runTaskboardCli([
+    '--database', database, '--attachment-root', join(root, '.dsh/taskboard-attachments'),
+    'project', 'create', '--key', 'OLD', '--name', 'Legacy',
+  ], quiet)
+  assert.equal(seeded, 0)
+  assert.equal(existsSync(join(root, '.dsh/.gitignore')), false)
+
+  const result = cliFrom(root, undefined, ['storage', 'status'], t)
+  assert.equal(result.code, 0)
+  const status = JSON.parse(result.stdout).value as { database: string; projectCount: number }
+  // The store is reused where it is, and only now gets its marker.
+  assert.equal(status.database, database)
+  assert.equal(status.projectCount, 1)
+  assert.match(readFileSync(join(root, '.dsh/.gitignore'), 'utf8'), /^#[^\n]*\n\*\n$/)
+  assert.equal(result.stderr.includes('created at'), false)
+})
