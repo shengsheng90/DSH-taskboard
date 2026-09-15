@@ -3,8 +3,10 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
-  AutomationId, CommentId, ProjectId, SqliteTaskboardProvider, TASKBOARD_SCHEMA_VERSION, TaskId, TaskboardError,
-  WorkflowNodeRegistry, parseTaskStatus,
+  AutomationId, CommentId, DEFAULT_TASKBOARD_ATTACHMENT_ROOT, DEFAULT_TASKBOARD_DATABASE_PATH,
+  formatTaskboardStorageLog, ProjectId, resolveTaskboardStoragePath, SqliteTaskboardProvider,
+  TASKBOARD_SCHEMA_VERSION, TaskId, TaskboardError, WorkflowNodeRegistry, parseTaskStatus,
+  type ResolvedTaskboardStoragePath, type TaskboardStorageKind,
 } from './index.js'
 import type {
   AutomationRuleConfig, AutomationState, CreateTaskRequest, FreshClaimRequest, HumanActor, RelationKind, TaskStatus,
@@ -107,6 +109,12 @@ function usage(): string {
   ].join('\n')
 }
 
+function emitStorageDiagnostics(io: CliIo, resolved: ResolvedTaskboardStoragePath, kind: TaskboardStorageKind): void {
+  const notable = resolved.source === 'user-data' || (kind === 'database' && resolved.created)
+  if (!notable) return
+  for (const line of formatTaskboardStorageLog(resolved, kind)) io.stderr(`${line}\n`)
+}
+
 /** Run one versioned JSON CLI command without triggering a model turn. */
 export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
   const args = [...argv]
@@ -128,12 +136,18 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     io.stderr(errorOutput(error))
     return CLI_EXIT_USAGE
   }
-  const database = options.get('database') ?? process.env['DSH_TASKBOARD_DATABASE'] ?? '.dsh/taskboard.sqlite'
-  const attachmentRoot = options.get('attachment-root') ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT'] ?? '.dsh/taskboard-attachments'
+  const database = resolveTaskboardStoragePath(
+    options.get('database') ?? process.env['DSH_TASKBOARD_DATABASE'] ?? DEFAULT_TASKBOARD_DATABASE_PATH,
+  )
+  const attachmentRoot = resolveTaskboardStoragePath(
+    options.get('attachment-root') ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT'] ?? DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
+  )
+  emitStorageDiagnostics(io, database, 'database')
+  emitStorageDiagnostics(io, attachmentRoot, 'attachments')
   let provider: SqliteTaskboardProvider
   try {
-    provider = new SqliteTaskboardProvider(database, {
-      root: attachmentRoot,
+    provider = new SqliteTaskboardProvider(database.path, {
+      root: attachmentRoot.path,
       maxAttachmentBytes: positiveInteger(options, 'max-attachment-bytes', 25 * 1024 * 1024),
       maxTaskAttachmentBytes: positiveInteger(options, 'max-task-attachment-bytes', 100 * 1024 * 1024),
       allowedContentTypes: (options.get('allowed-content-types')

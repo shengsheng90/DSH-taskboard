@@ -208,6 +208,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 .dsh/taskboard-attachments
 ```
 
+这些默认值是**相对路径**。它们绑定到最近的 git 项目（向上找到含 `.git` 的目录），而不是进程当前工作目录。如果 DSH 或 CLI 从 `~/.claude` 这类非项目目录启动，文件会落到 `$DSH_HOME`（默认 `~/.dsh`），而不会在启动 cwd 里静默建一个 `.dsh/`。绝对路径以及 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` 会跳过这套查找。若 cwd 相对路径上已经有文件，会继续用它，避免丢掉已经建好的库。启动日志会打出解析后的绝对路径；新建库时还有 `taskboard database created at <abs path>`。详见 [配置](#配置)。
+
 ### 安装排错
 
 | 现象 | 原因 | 对策 |
@@ -322,10 +324,19 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 
 `cordis.patch.yml` 挂载一个 Host 插件，id 为 `taskboard`。可在 profile 组成层或环境变量中覆盖。路径由 Host 解析，浏览器不能选择数据库或附件根目录。
 
+相对路径形式的 `databasePath` / `attachmentRoot` **不依赖进程 cwd**：
+
+1. `:memory:` 和绝对路径按原样使用。
+2. 若 cwd 相对路径上已经有文件或目录，则继续用该位置。
+3. 否则从进程 cwd 向上找到最近的 git 根（含 `.git` 文件或目录），相对路径相对于该根解析。这才是项目本地库。
+4. 若找不到 git 项目，则落到 `$DSH_HOME`（默认 `~/.dsh`），文件名取配置路径的 basename——默认即 `~/.dsh/taskboard.sqlite` 和 `~/.dsh/taskboard-attachments`。
+
+用 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`（或 CLI 的 `--database` / `--attachment-root`）可强制指定位置。Host 启动时会把解析后的绝对路径写入日志。
+
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE` |
-| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS` |
+| `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE`。相对路径按上面的 git 根 / `$DSH_HOME` 规则解析，不会直接跟进程 cwd 走。 |
+| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`。解析规则与 `databasePath` 相同。 |
 | `pageSize` | `100` | `taskboard_list` 单页大小，结果会带上匹配总数 |
 | `snapshotTaskLimit` | `1000` | 单次网页快照的任务数上限，被截断时页面会给出提示 |
 | `maxAttachmentBytes` | `26214400` | 单文件 25 MiB |

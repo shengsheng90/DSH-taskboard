@@ -155,3 +155,23 @@ test('CLI task creation refuses a status the lifecycle does not own', t => {
   assert.equal(cli(['task', 'create', '--project', project.id, '--title', 'Allowed', '--status', 'todo']).code, 0)
   assert.equal((JSON.parse(cli(['task', 'list', '--project', project.id]).stdout).value as unknown[]).length, 1)
 })
+
+test('CLI logs the absolute path when it creates a new database and stays quiet on reopen', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-cli-create-log-'))
+  t.after(() => { rmSync(directory, { recursive: true, force: true }) })
+  const database = join(directory, 'taskboard.sqlite')
+  const invoke = (): { code: number; stderr: string } => {
+    let stdout = ''
+    let stderr = ''
+    const code = runTaskboardCli(['--database', database, 'storage', 'status'], {
+      stdout: value => { stdout += value }, stderr: value => { stderr += value },
+    })
+    return { code, stderr }
+  }
+  const created = invoke()
+  assert.equal(created.code, 0)
+  assert.ok(created.stderr.includes(`taskboard database created at ${database}`))
+  const reopened = invoke()
+  assert.equal(reopened.code, 0)
+  assert.equal(reopened.stderr.includes('created at'), false)
+})

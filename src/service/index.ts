@@ -1,4 +1,3 @@
-import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Config } from '../index.js'
@@ -12,7 +11,12 @@ import type {
   TaskboardStorageHealth, UpdateProjectRequest, UpdateTaskRequest,
   WorkflowCatalogEntry, WorkflowDocument,
 } from '../domain/index.js'
-import { SqliteTaskboardProvider } from '../sqlite/index.js'
+import {
+  formatTaskboardStorageLog,
+  resolveTaskboardStoragePath,
+  SqliteTaskboardProvider,
+  type ResolvedTaskboardStoragePath,
+} from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -179,9 +183,24 @@ function resolveAutomationDefaults(
   }
 }
 
-function resolved(config: Config): ResolvedTaskboardConfig {
-  const databasePath = config.databasePath === ':memory:' ? ':memory:' : resolve(config.databasePath)
-  const attachmentRoot = resolve(config.attachmentRoot)
+function logStorageResolution(
+  ctx: Context,
+  database: ResolvedTaskboardStoragePath,
+  attachments: ResolvedTaskboardStoragePath,
+): void {
+  const logger = (ctx as Context & {
+    logger?: { info(message: string): void; warn(message: string): void }
+  }).logger
+  if (logger === undefined || typeof logger.info !== 'function') return
+  const emit = (line: string): void => {
+    if (line.includes('not a git project') && typeof logger.warn === 'function') logger.warn(line)
+    else logger.info(line)
+  }
+  for (const line of formatTaskboardStorageLog(database, 'database')) emit(line)
+  for (const line of formatTaskboardStorageLog(attachments, 'attachments')) emit(line)
+}
+
+function resolved(config: Config, databasePath: string, attachmentRoot: string): ResolvedTaskboardConfig {
   const maxAttachmentBytes = config.maxAttachmentBytes ?? 25 * 1024 * 1024
   const maxTaskAttachmentBytes = config.maxTaskAttachmentBytes ?? 100 * 1024 * 1024
   if (maxTaskAttachmentBytes < maxAttachmentBytes) {
@@ -238,7 +257,10 @@ export class TaskboardService extends TypertRemoteService {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'taskboard')
     this.hostCtx = ctx
-    this.config = resolved(config)
+    const databaseStorage = resolveTaskboardStoragePath(config.databasePath)
+    const attachmentStorage = resolveTaskboardStoragePath(config.attachmentRoot)
+    this.config = resolved(config, databaseStorage.path, attachmentStorage.path)
+    logStorageResolution(ctx, databaseStorage, attachmentStorage)
     this.provider = new SqliteTaskboardProvider(this.config.databasePath, {
       root: this.config.attachmentRoot,
       maxAttachmentBytes: this.config.maxAttachmentBytes,
