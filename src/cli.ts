@@ -4,9 +4,9 @@ import { basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   AutomationId, CommentId, DEFAULT_TASKBOARD_ATTACHMENT_ROOT, DEFAULT_TASKBOARD_DATABASE_PATH,
-  formatTaskboardStorageLog, ProjectId, resolveTaskboardStoragePath, SqliteTaskboardProvider,
-  TASKBOARD_SCHEMA_VERSION, TaskId, TaskboardError, WorkflowNodeRegistry, parseTaskStatus,
-  type ResolvedTaskboardStoragePath, type TaskboardStorageKind,
+  ProjectId, resolveTaskboardStorage, SqliteTaskboardProvider, TASKBOARD_SCHEMA_VERSION, TaskId,
+  TaskboardError, WorkflowNodeRegistry, parseTaskStatus, taskboardStorageLog,
+  writeTaskboardStorageIgnore, type TaskboardStorageLayout,
 } from './index.js'
 import type {
   AutomationRuleConfig, AutomationState, CreateTaskRequest, FreshClaimRequest, HumanActor, RelationKind, TaskStatus,
@@ -109,10 +109,14 @@ function usage(): string {
   ].join('\n')
 }
 
-function emitStorageDiagnostics(io: CliIo, resolved: ResolvedTaskboardStoragePath, kind: TaskboardStorageKind): void {
-  const notable = resolved.source === 'user-data' || (kind === 'database' && resolved.created)
-  if (!notable) return
-  for (const line of formatTaskboardStorageLog(resolved, kind)) io.stderr(`${line}\n`)
+/**
+ * The CLI runs once per command and its stdout is a JSON contract, so diagnostics go to stderr and
+ * stay quiet for a store that was merely reopened. A database this call had to create, or a cwd
+ * with no project behind it, is what an operator has to be told about.
+ */
+function emitStorageDiagnostics(io: CliIo, layout: TaskboardStorageLayout): void {
+  if (layout.baseSource !== 'user-data' && layout.database.existed) return
+  for (const line of taskboardStorageLog(layout)) io.stderr(`${line}\n`)
 }
 
 /** Run one versioned JSON CLI command without triggering a model turn. */
@@ -136,18 +140,19 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     io.stderr(errorOutput(error))
     return CLI_EXIT_USAGE
   }
-  const database = resolveTaskboardStoragePath(
+  const layout = resolveTaskboardStorage(
     options.get('database') ?? process.env['DSH_TASKBOARD_DATABASE'] ?? DEFAULT_TASKBOARD_DATABASE_PATH,
+    // `DSH_TASKBOARD_ATTACHMENTS` is the name the Host plugin and both READMEs use. The older
+    // `DSH_TASKBOARD_ATTACHMENT_ROOT` this CLI shipped with keeps working.
+    options.get('attachment-root')
+      ?? process.env['DSH_TASKBOARD_ATTACHMENTS']
+      ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT']
+      ?? DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
   )
-  const attachmentRoot = resolveTaskboardStoragePath(
-    options.get('attachment-root') ?? process.env['DSH_TASKBOARD_ATTACHMENT_ROOT'] ?? DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
-  )
-  emitStorageDiagnostics(io, database, 'database')
-  emitStorageDiagnostics(io, attachmentRoot, 'attachments')
   let provider: SqliteTaskboardProvider
   try {
-    provider = new SqliteTaskboardProvider(database.path, {
-      root: attachmentRoot.path,
+    provider = new SqliteTaskboardProvider(layout.database.path, {
+      root: layout.attachments.path,
       maxAttachmentBytes: positiveInteger(options, 'max-attachment-bytes', 25 * 1024 * 1024),
       maxTaskAttachmentBytes: positiveInteger(options, 'max-task-attachment-bytes', 100 * 1024 * 1024),
       allowedContentTypes: (options.get('allowed-content-types')
@@ -159,6 +164,9 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     io.stderr(errorOutput(error))
     return CLI_EXIT_UNAVAILABLE
   }
+  // Only after the store is open: the report has to describe what exists, not what was intended.
+  emitStorageDiagnostics(io, layout)
+  writeTaskboardStorageIgnore(layout)
   try {
     const actor = human(options)
     const workflowNodes = new WorkflowNodeRegistry()
@@ -328,8 +336,9 @@ export function runTaskboardCli(argv: readonly string[], io: CliIo): number {
     } else if (group === 'storage' && command === 'status') {
       const cleanup = provider.retryAttachmentCleanup()
       value = {
-        database,
-        attachmentRoot,
+        // Strings, as `storage status` has always reported them, now always absolute.
+        database: layout.database.path,
+        attachmentRoot: layout.attachments.path,
         ...provider.storageHealth(),
         attachmentCleanup: cleanup,
       }

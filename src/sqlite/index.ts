@@ -4,12 +4,18 @@ export {
   DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
   DEFAULT_TASKBOARD_DATABASE_PATH,
   findGitRoot,
-  formatTaskboardStorageLog,
+  findProjectGitRoot,
+  isProjectGitRoot,
+  resolveTaskboardStorage,
   resolveTaskboardStoragePath,
+  taskboardStorageLog,
+  writeTaskboardStorageIgnore,
 } from './paths.js'
 export type {
   ResolveTaskboardStorageOptions,
   ResolvedTaskboardStoragePath,
-  TaskboardStorageKind,
+  TaskboardStorageBaseSource,
+  TaskboardStorageLayout,
   TaskboardStorageSource,
+  WriteTaskboardStorageIgnoreOptions,
 } from './paths.js'

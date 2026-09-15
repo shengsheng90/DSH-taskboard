@@ -17,6 +17,7 @@ import type {
   AutomationActor, AutomationDecision, AutomationRule, AutomationRuleConfig, AutomationRun, AutomationState,
   TaskboardAutomationId,
 } from '../domain/index.js'
+import { DEFAULT_TASKBOARD_ATTACHMENT_ROOT, resolveTaskboardStoragePath } from './paths.js'
 import { openTaskboardDatabase, TASKBOARD_SCHEMA_VERSION } from './schema.js'
 
 type Row = Record<string, unknown>
@@ -31,7 +32,7 @@ export interface TaskboardAttachmentOptions {
 }
 
 const DEFAULT_ATTACHMENT_OPTIONS: TaskboardAttachmentOptions = {
-  root: '.dsh/taskboard-attachments',
+  root: DEFAULT_TASKBOARD_ATTACHMENT_ROOT,
   maxAttachmentBytes: 25 * 1024 * 1024,
   maxTaskAttachmentBytes: 100 * 1024 * 1024,
   allowedContentTypes: [
@@ -304,7 +305,11 @@ export class SqliteTaskboardProvider {
     this.attachmentOptions = {
       ...DEFAULT_ATTACHMENT_OPTIONS,
       ...attachmentOptions,
-      root: resolve(attachmentOptions?.root ?? DEFAULT_ATTACHMENT_OPTIONS.root),
+      // An explicit root is the caller's decision. The default one is relative, and resolving that
+      // against whatever cwd the process inherited is what left an empty store in `~/.claude`.
+      root: attachmentOptions?.root === undefined
+        ? resolveTaskboardStoragePath(DEFAULT_ATTACHMENT_OPTIONS.root).path
+        : resolve(attachmentOptions.root),
       allowedContentTypes: [...(attachmentOptions?.allowedContentTypes ?? DEFAULT_ATTACHMENT_OPTIONS.allowedContentTypes)],
     }
     this.validateAttachmentOptions()

@@ -12,10 +12,11 @@ import type {
   WorkflowCatalogEntry, WorkflowDocument,
 } from '../domain/index.js'
 import {
-  formatTaskboardStorageLog,
-  resolveTaskboardStoragePath,
+  resolveTaskboardStorage,
   SqliteTaskboardProvider,
-  type ResolvedTaskboardStoragePath,
+  taskboardStorageLog,
+  writeTaskboardStorageIgnore,
+  type TaskboardStorageLayout,
 } from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
@@ -183,21 +184,8 @@ function resolveAutomationDefaults(
   }
 }
 
-function logStorageResolution(
-  ctx: Context,
-  database: ResolvedTaskboardStoragePath,
-  attachments: ResolvedTaskboardStoragePath,
-): void {
-  const logger = (ctx as Context & {
-    logger?: { info(message: string): void; warn(message: string): void }
-  }).logger
-  if (logger === undefined || typeof logger.info !== 'function') return
-  const emit = (line: string): void => {
-    if (line.includes('not a git project') && typeof logger.warn === 'function') logger.warn(line)
-    else logger.info(line)
-  }
-  for (const line of formatTaskboardStorageLog(database, 'database')) emit(line)
-  for (const line of formatTaskboardStorageLog(attachments, 'attachments')) emit(line)
+function logStorageResolution(ctx: Context, layout: TaskboardStorageLayout): void {
+  for (const line of taskboardStorageLog(layout)) ctx.logger.info(line)
 }
 
 function resolved(config: Config, databasePath: string, attachmentRoot: string): ResolvedTaskboardConfig {
@@ -257,10 +245,8 @@ export class TaskboardService extends TypertRemoteService {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'taskboard')
     this.hostCtx = ctx
-    const databaseStorage = resolveTaskboardStoragePath(config.databasePath)
-    const attachmentStorage = resolveTaskboardStoragePath(config.attachmentRoot)
-    this.config = resolved(config, databaseStorage.path, attachmentStorage.path)
-    logStorageResolution(ctx, databaseStorage, attachmentStorage)
+    const storage = resolveTaskboardStorage(config.databasePath, config.attachmentRoot)
+    this.config = resolved(config, storage.database.path, storage.attachments.path)
     this.provider = new SqliteTaskboardProvider(this.config.databasePath, {
       root: this.config.attachmentRoot,
       maxAttachmentBytes: this.config.maxAttachmentBytes,
@@ -268,6 +254,10 @@ export class TaskboardService extends TypertRemoteService {
       allowedContentTypes: this.config.allowedAttachmentTypes,
       allowSharedWorktrees: this.config.allowSharedWorktrees,
     })
+    // Report the store only once it is actually open: a log line must never claim a database
+    // that failed to initialize.
+    logStorageResolution(ctx, storage)
+    writeTaskboardStorageIgnore(storage)
     this.lastRevision = this.provider.globalRevision()
     this.attachmentRoutes = new TaskboardAttachmentRoutes(this.provider)
     ctx.effect(() => () => { this.provider.close() }, 'taskboard: close SQLite authority')

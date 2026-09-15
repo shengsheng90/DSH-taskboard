@@ -208,7 +208,7 @@ Default data files (created on first use; the Host resolves these paths):
 .dsh/taskboard-attachments
 ```
 
-Those defaults are **relative**. They bind to the nearest git project (a parent directory that contains `.git`), not the process current working directory. If DSH or the CLI is started from a non-project directory such as `~/.claude`, the files are created under `$DSH_HOME` (default `~/.dsh`) instead of silently dropping a `.dsh/` folder in the startup cwd. Absolute paths and `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` skip this lookup. A cwd-relative file that already exists is kept, so previously created databases are not abandoned. Startup logs include the resolved absolute path, and `taskboard database created at <abs path>` when a new database is initialized. See [Configuration](#configuration).
+Those defaults are **relative**, and a Host inherits its working directory from whatever started it, so they are never resolved against a raw process cwd. They bind to the nearest git project above the startup directory; configuration directories are not projects, so a versioned `~/.claude` or `~/.config/...` is skipped rather than written into. With no project behind the startup directory the store goes to `$DSH_HOME` (default `~/.dsh`) instead of dropping a `.dsh/` folder where nobody asked for one. An existing cwd-relative database is kept, so stores created before this rule are not abandoned, and a project-local store gets a `.dsh/.gitignore` so it stays out of `git status`. The Host logs the resolved absolute paths on startup, plus `taskboard database created at <abs path>` when it initializes a new one. Absolute values, including absolute `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`, are used as given. See [Configuration](#configuration).
 
 ### Install troubleshooting
 
@@ -324,19 +324,21 @@ Assigning a saved workflow adds its ordered tabs, branches, node kinds, and conf
 
 `cordis.patch.yml` mounts one Host plugin id `taskboard`. Override values in the profile composition or with environment variables. Paths are resolved by the Host. The browser cannot choose the database or attachment root.
 
-Relative `databasePath` / `attachmentRoot` values are **cwd-independent**:
+Relative `databasePath` / `attachmentRoot` values are **cwd-independent**. Both are resolved together against one base, so the authority rows and the attachment bytes can never end up in different directories:
 
 1. `:memory:` and absolute paths are used as given.
-2. If the cwd-relative file or directory already exists, that location is kept.
-3. Otherwise the path is resolved against the nearest git root (walk up from the process cwd until a `.git` file or directory is found). That is the project-local database.
-4. If no git project is found, files go under `$DSH_HOME` (default `~/.dsh`), using the configured basename — for the defaults, `~/.dsh/taskboard.sqlite` and `~/.dsh/taskboard-attachments`.
+2. If the cwd-relative database already exists, that location is kept. A store created before this rule is never abandoned. When only `attachmentRoot` is relative, it anchors this step instead, so bytes an absolute database points at are not orphaned.
+3. Otherwise the base is the nearest git project above the process cwd: walk up until a directory contains `.git`, skipping roots that hold configuration rather than work — the home directory itself, anything above it, and dot-directories inside it such as `~/.claude` or `~/.config/nvim`. A project-local store also receives a `.dsh/.gitignore` (an existing one is left alone), so it never appears in the project's `git status`.
+4. If no project is found, files go under `$DSH_HOME` (default `~/.dsh`), using the configured basename — for the defaults, `~/.dsh/taskboard.sqlite` and `~/.dsh/taskboard-attachments`.
 
-Set `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` (or pass `--database` / `--attachment-root` to the CLI) to force a location. The Host logs the resolved absolute path on startup.
+Rule 3 is deliberate: a Host started inside any git project gets a store in that project, because the board is project-local by design. A Host that must always serve one board should pin it with an absolute path rather than rely on where it was started.
+
+Set `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` to an absolute path (or pass `--database` / `--attachment-root` to the CLI) to force a location; a relative value follows the same four rules. The Host logs the resolved absolute paths on startup, and `taskboard database created at <abs path>` when it initializes a new database. The CLI writes the same lines to stderr, but only when it had to create a database or fell back to `$DSH_HOME` — its stdout stays a pure JSON contract. `dsh-taskboard storage status` reports both resolved paths.
 
 | Key | Default | Notes |
 |---|---|---|
 | `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE`. Relative values follow the git-root / `$DSH_HOME` rules above; they are not resolved against a raw process cwd. |
-| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`. Same resolution rules as `databasePath`. |
+| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`. Same resolution rules as `databasePath`, against the same base. The CLI also accepts the older `DSH_TASKBOARD_ATTACHMENT_ROOT`. |
 | `pageSize` | `100` | Bounded `taskboard_list` page; the result reports the matching total |
 | `snapshotTaskLimit` | `1000` | Tasks per web snapshot; the page reports when it was truncated |
 | `maxAttachmentBytes` | `26214400` | Per file (25 MiB) |

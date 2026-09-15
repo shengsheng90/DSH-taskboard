@@ -208,7 +208,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 .dsh/taskboard-attachments
 ```
 
-这些默认值是**相对路径**。它们绑定到最近的 git 项目（向上找到含 `.git` 的目录），而不是进程当前工作目录。如果 DSH 或 CLI 从 `~/.claude` 这类非项目目录启动，文件会落到 `$DSH_HOME`（默认 `~/.dsh`），而不会在启动 cwd 里静默建一个 `.dsh/`。绝对路径以及 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` 会跳过这套查找。若 cwd 相对路径上已经有文件，会继续用它，避免丢掉已经建好的库。启动日志会打出解析后的绝对路径；新建库时还有 `taskboard database created at <abs path>`。详见 [配置](#配置)。
+这些默认值是**相对路径**。Host 的工作目录是从启动它的进程继承来的，所以它们不会按进程 cwd 解析：它们绑定到启动目录往上最近的 git 项目；配置目录不算项目，纳入版本管理的 `~/.claude`、`~/.config/...` 会被跳过，而不是被写进去。启动目录背后没有项目时，数据落到 `$DSH_HOME`（默认 `~/.dsh`），不会在没人指定的目录里建 `.dsh/`。cwd 相对路径上已经存在的数据库会继续沿用，之前建好的库不会被丢下；项目内的库还会附带一个 `.dsh/.gitignore`，不出现在 `git status` 里。Host 启动时把解析后的绝对路径写进日志，新建库时还有一行 `taskboard database created at <abs path>`。绝对路径（包括绝对的 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`）按原样使用。详见 [配置](#配置)。
 
 ### 安装排错
 
@@ -324,19 +324,21 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 
 `cordis.patch.yml` 挂载一个 Host 插件，id 为 `taskboard`。可在 profile 组成层或环境变量中覆盖。路径由 Host 解析，浏览器不能选择数据库或附件根目录。
 
-相对路径形式的 `databasePath` / `attachmentRoot` **不依赖进程 cwd**：
+相对路径形式的 `databasePath` / `attachmentRoot` **不依赖进程 cwd**。两者一起解析到同一个基准目录，权威数据和附件字节不会落到不同的地方：
 
 1. `:memory:` 和绝对路径按原样使用。
-2. 若 cwd 相对路径上已经有文件或目录，则继续用该位置。
-3. 否则从进程 cwd 向上找到最近的 git 根（含 `.git` 文件或目录），相对路径相对于该根解析。这才是项目本地库。
-4. 若找不到 git 项目，则落到 `$DSH_HOME`（默认 `~/.dsh`），文件名取配置路径的 basename——默认即 `~/.dsh/taskboard.sqlite` 和 `~/.dsh/taskboard-attachments`。
+2. 若 cwd 相对路径上的数据库已经存在，就沿用该位置，之前建好的库不会被丢下。只有 `attachmentRoot` 是相对路径时，改由它来定这一步，绝对路径数据库指向的附件字节不会被孤立。
+3. 否则基准目录取进程 cwd 往上最近的 git 项目：逐级向上直到某个目录含 `.git`，并跳过那些装配置而不是装工作的根——home 目录本身、它上面的目录，以及 home 里的点目录（如 `~/.claude`、`~/.config/nvim`）。项目内的库还会写一个 `.dsh/.gitignore`（已存在则不动），不会出现在项目的 `git status` 里。
+4. 找不到项目时，文件落到 `$DSH_HOME`（默认 `~/.dsh`），文件名取配置路径的 basename——默认即 `~/.dsh/taskboard.sqlite` 和 `~/.dsh/taskboard-attachments`。
 
-用 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS`（或 CLI 的 `--database` / `--attachment-root`）可强制指定位置。Host 启动时会把解析后的绝对路径写入日志。
+第 3 条是有意为之：Host 在哪个 git 项目里启动，库就建在那个项目里——任务板本来就是项目本地的。如果一个 Host 始终只服务一块板，就用绝对路径钉死，别依赖它从哪里启动。
+
+把 `DSH_TASKBOARD_DATABASE` / `DSH_TASKBOARD_ATTACHMENTS` 设成绝对路径（或给 CLI 传 `--database` / `--attachment-root`）可强制指定位置；相对值同样走上面四条规则。Host 启动时把解析后的绝对路径写入日志，新建数据库时再加一行 `taskboard database created at <abs path>`。CLI 把同样的内容写到 stderr，但只在它新建了数据库、或回退到 `$DSH_HOME` 时才输出——stdout 保持纯 JSON 契约。`dsh-taskboard storage status` 会报告这两个解析后的路径。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `databasePath` | `.dsh/taskboard.sqlite` | `DSH_TASKBOARD_DATABASE`。相对路径按上面的 git 根 / `$DSH_HOME` 规则解析，不会直接跟进程 cwd 走。 |
-| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`。解析规则与 `databasePath` 相同。 |
+| `attachmentRoot` | `.dsh/taskboard-attachments` | `DSH_TASKBOARD_ATTACHMENTS`。解析规则与 `databasePath` 相同，且共用同一个基准目录。CLI 同时兼容旧的 `DSH_TASKBOARD_ATTACHMENT_ROOT`。 |
 | `pageSize` | `100` | `taskboard_list` 单页大小，结果会带上匹配总数 |
 | `snapshotTaskLimit` | `1000` | 单次网页快照的任务数上限，被截断时页面会给出提示 |
 | `maxAttachmentBytes` | `26214400` | 单文件 25 MiB |

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -174,4 +174,61 @@ test('CLI logs the absolute path when it creates a new database and stays quiet 
   const reopened = invoke()
   assert.equal(reopened.code, 0)
   assert.equal(reopened.stderr.includes('created at'), false)
+})
+
+/** Start the CLI from `cwd` with its default relative paths, the way an inherited cwd would. */
+function cliFrom(cwd: string, dshHome: string | undefined, args: string[], t: { after(fn: () => void): void }): {
+  code: number
+  stdout: string
+  stderr: string
+} {
+  const previousCwd = process.cwd()
+  const previousHome = process.env['DSH_HOME']
+  t.after(() => {
+    process.chdir(previousCwd)
+    if (previousHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = previousHome
+  })
+  if (dshHome === undefined) delete process.env['DSH_HOME']
+  else process.env['DSH_HOME'] = dshHome
+  process.chdir(cwd)
+  let stdout = ''
+  let stderr = ''
+  const code = runTaskboardCli(args, {
+    stdout: value => { stdout += value }, stderr: value => { stderr += value },
+  })
+  return { code, stdout, stderr }
+}
+
+test('CLI started outside a project leaves that directory alone', t => {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-nonproject-')))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-home-')))
+  t.after(() => {
+    rmSync(cwd, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  })
+  const result = cliFrom(cwd, join(home, '.dsh'), ['storage', 'status'], t)
+
+  assert.equal(result.code, 0)
+  assert.equal(JSON.parse(result.stdout).schemaVersion, 1)
+  // The startup directory is inherited, never chosen: nothing may be created in it.
+  assert.equal(existsSync(join(cwd, '.dsh')), false)
+  assert.equal(existsSync(join(home, '.dsh/taskboard.sqlite')), true)
+  assert.match(result.stderr, /taskboard cwd is not a git project/)
+  assert.ok(result.stderr.includes(`taskboard database created at ${join(home, '.dsh/taskboard.sqlite')}`))
+})
+
+test('CLI started below a project root stores the board at that root and keeps it out of git', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-taskboard-project-')))
+  t.after(() => { rmSync(root, { recursive: true, force: true }) })
+  mkdirSync(join(root, '.git'))
+  const nested = join(root, 'src/sqlite')
+  mkdirSync(nested, { recursive: true })
+  const result = cliFrom(nested, undefined, ['storage', 'status'], t)
+
+  assert.equal(result.code, 0)
+  assert.equal(existsSync(join(root, '.dsh/taskboard.sqlite')), true)
+  assert.equal(existsSync(join(nested, '.dsh')), false)
+  assert.match(readFileSync(join(root, '.dsh/.gitignore'), 'utf8'), /^#[^\n]*\n\*\n$/)
+  assert.equal(result.stderr.includes('not a git project'), false)
 })

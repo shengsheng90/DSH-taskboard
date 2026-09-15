@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { TaskboardAutomationCoordinator } from '../src/automation/index.js'
@@ -468,6 +471,27 @@ test('a replacement change watch releases the waiter its page abandoned', async 
     service.provider.createProject({ key: 'DSH', name: 'Harness' }, { kind: 'human', actorId: 'test-human' })
     assert.equal((await replacement).changed, true)
     assert.equal((await other).changed, true)
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('service reports the store it opened through the Host logger', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-taskboard-service-storage-'))
+  t.after(() => { rmSync(directory, { recursive: true, force: true }) })
+  const databasePath = join(directory, 'taskboard.sqlite')
+  const attachmentRoot = join(directory, 'attachments')
+  const ctx = new Context()
+  const lines: string[] = []
+  ctx.logger.exporter({ export: message => { lines.push(message.args.map(String).join(' ')) } })
+
+  const service = new TaskboardService(ctx, { databasePath, attachmentRoot })
+  try {
+    assert.deepEqual(lines, [
+      `taskboard database path: ${databasePath}`,
+      `taskboard attachments path: ${attachmentRoot}`,
+      `taskboard database created at ${databasePath}`,
+    ])
   } finally {
     service.provider.close()
   }
