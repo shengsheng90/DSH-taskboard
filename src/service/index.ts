@@ -227,7 +227,7 @@ export class TaskboardService extends TypertRemoteService {
   private readonly hostCtx: Context
   readonly config: ResolvedTaskboardConfig
   readonly provider: SqliteTaskboardProvider
-  readonly workflowNodes = new WorkflowNodeRegistry()
+  readonly workflowNodes: WorkflowNodeRegistry = new WorkflowNodeRegistry()
   readonly attachmentRoutes: TaskboardAttachmentRoutes
   private workflowSkills: Array<{ name: string; description: string }> = []
   private workflowMcpTools: Array<{ name: string; description: string }> = []

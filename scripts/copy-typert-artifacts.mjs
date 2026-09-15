@@ -10,7 +10,17 @@ const artifacts = [
   'typert.host.d.ts',
   'typert.remote-client.js',
   'typert.remote-client.d.ts',
+  'typert.remote-client.d.ts.map',
 ]
 
 await mkdir(destination, { recursive: true })
-await Promise.all(artifacts.map(name => copyFile(resolve(source, name), resolve(destination, name))))
+await Promise.all(artifacts.map(async name => {
+  try {
+    await copyFile(resolve(source, name), resolve(destination, name))
+  } catch (error) {
+    if (name.endsWith('.map') && error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return
+    }
+    throw error
+  }
+}))

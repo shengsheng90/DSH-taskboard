@@ -1289,7 +1289,7 @@ export class SqliteTaskboardProvider {
     return (rows as Row[]).map(mapAutomation)
   }
 
-  listAutomationRuns(projectId: TaskboardProjectId, limit = 50): AutomationRun[] {
+  listAutomationRuns(projectId: TaskboardProjectId, limit: number = 50): AutomationRun[] {
     const rows = this.sql(`
       SELECT r.id, r.rule_id, r.decision_json, r.created_at
       FROM automation_runs r
@@ -1690,7 +1690,7 @@ export class SqliteTaskboardProvider {
   /** Retry bounded, durable deletion work left by row publication or authoritative deletion.
    *  Entries that keep failing stop being retried past ATTACHMENT_CLEANUP_MAX_ATTEMPTS; they stay
    *  in the table for inspection but no longer hold storage health at 'degraded' forever. */
-  retryAttachmentCleanup(limit = 100): { readonly removed: number; readonly pending: number; readonly stalled: number } {
+  retryAttachmentCleanup(limit: number = 100): { readonly removed: number; readonly pending: number; readonly stalled: number } {
     const bounded = Math.min(Math.max(Math.trunc(limit), 1), 1_000)
     const rows = this.sql('SELECT storage_key FROM attachment_cleanup WHERE attempts < ? ORDER BY created_at, storage_key LIMIT ?')
       .all(ATTACHMENT_CLEANUP_MAX_ATTEMPTS, bounded) as Row[]

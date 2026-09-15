@@ -10,6 +10,8 @@ xy-shengsheng.pub
 .DS_Store
 .dsh/
 .pnpm-store/
+.typert-workspace/
+.tmp/
 node_modules/
 lib/
 *.tgz

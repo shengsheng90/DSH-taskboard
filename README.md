@@ -9,7 +9,7 @@ This README is written so a human **or another coding agent** can install the pl
 **Package:** `@shengsheng/dsh-taskboard`  
 **Repository:** https://github.com/shengsheng90/DSH-taskboard  
 **License:** Apache-2.0  
-**Compatible Host:** DeepSeek Harness `0.1.2-alpha.2`
+**Compatible Host:** DeepSeek Harness `0.1.6-alpha.1`
 
 ![Native Taskboard board, task detail, and workflow views](docs/assets/taskboard-demo.gif)
 
@@ -37,7 +37,7 @@ Further design docs: [Architecture](docs/architecture.md), [Security and recover
 |---|---|
 | Node.js | `^22.19.0` or `>=24.0.0` (24 recommended; built-in `node:sqlite`) |
 | pnpm | `11` (`packageManager` is `pnpm@11.15.1`) |
-| DeepSeek Harness | `0.1.2-alpha.2` checkout or installation, **web** profile |
+| DeepSeek Harness | `0.1.6-alpha.1` checkout or installation, **web** profile |
 | Network | only needed to clone this repo and install Node dependencies |
 | Permissions | write access to `$DSH_HOME` (default `~/.dsh`) and the ability to restart the Harness process |
 
@@ -388,7 +388,7 @@ pnpm build
 pnpm example
 ```
 
-`pnpm build` compiles Host declarations and runtime, copies the checked official Typert generator artifacts, and produces the browser bundle. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout.
+`pnpm build` compiles Host declarations and runtime, copies the checked Typert artifacts, and produces the browser bundle. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout. Maintainers regenerate those files with `pnpm generate:typert` against a local DeepSeek Harness checkout (default `../deepseek-harness`).
 
 `pnpm check` runs typecheck, tests, and build.
 
