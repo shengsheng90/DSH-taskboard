@@ -44,6 +44,7 @@ export const TYPERT = {
             mode: 'strict',
             typeSymbol: '@shengsheng/dsh-taskboard/domain#TaskboardRemoteMutationRequest',
             create: _shengsheng_dsh_taskboard_taskboard_mutate_parameter_0$schema,
+            get schema() { return _shengsheng_dsh_taskboard_taskboard_mutate_parameter_0$schema() },
           },
         },
       ],
@@ -51,8 +52,9 @@ export const TYPERT = {
         mode: 'strict',
         typeSymbol: '@shengsheng/dsh-taskboard/domain#TaskboardRemoteMutationResult',
         create: _shengsheng_dsh_taskboard_taskboard_mutate_result$schema,
+        get schema() { return _shengsheng_dsh_taskboard_taskboard_mutate_result$schema() },
       },
-      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":403,"column":9},
+      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":405,"column":9},
     },
     {
       id: '@shengsheng/dsh-taskboard#taskboard/snapshot',
@@ -71,6 +73,7 @@ export const TYPERT = {
             mode: 'strict',
             typeSymbol: '@shengsheng/dsh-taskboard#taskboard/snapshot:projectId',
             create: _shengsheng_dsh_taskboard_taskboard_snapshot_parameter_0$schema,
+            get schema() { return _shengsheng_dsh_taskboard_taskboard_snapshot_parameter_0$schema() },
           },
         },
       ],
@@ -78,8 +81,9 @@ export const TYPERT = {
         mode: 'strict',
         typeSymbol: '@shengsheng/dsh-taskboard#taskboard/snapshot:result',
         create: _shengsheng_dsh_taskboard_taskboard_snapshot_result$schema,
+        get schema() { return _shengsheng_dsh_taskboard_taskboard_snapshot_result$schema() },
       },
-      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":393,"column":3},
+      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":395,"column":3},
     },
     {
       id: '@shengsheng/dsh-taskboard#taskboard/taskDetail',
@@ -97,6 +101,7 @@ export const TYPERT = {
             mode: 'strict',
             typeSymbol: '@shengsheng/dsh-taskboard#taskboard/taskDetail:taskId',
             create: _shengsheng_dsh_taskboard_taskboard_taskDetail_parameter_0$schema,
+            get schema() { return _shengsheng_dsh_taskboard_taskboard_taskDetail_parameter_0$schema() },
           },
         },
       ],
@@ -104,8 +109,9 @@ export const TYPERT = {
         mode: 'strict',
         typeSymbol: '@shengsheng/dsh-taskboard#taskboard/taskDetail:result',
         create: _shengsheng_dsh_taskboard_taskboard_taskDetail_result$schema,
+        get schema() { return _shengsheng_dsh_taskboard_taskboard_taskDetail_result$schema() },
       },
-      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":398,"column":3},
+      sourceLocation: {"file":"packages/taskboard/src/service/index.ts","line":400,"column":3},
     },
   ],
   model: {
@@ -131,7 +137,9 @@ export const TYPERT = {
           {
             "kind": "property",
             "name": "workflowNodes",
-            "signature": "readonly workflowNodes: WorkflowNodeRegistry = new WorkflowNodeRegistry()"
+            "signature": "readonly workflowNodes: WorkflowNodeRegistry = new WorkflowNodeRegistry()",
+            "summary": "Annotated although TypeScript infers it: the Typert generator reads declaration text into `TYPERT.model`, and an inferred member emits a signature the Host catalog cannot resolve.",
+            "jsDoc": "/** Annotated although TypeScript infers it: the Typert generator reads declaration text into\n *  `TYPERT.model`, and an inferred member emits a signature the Host catalog cannot resolve. */"
           },
           {
             "kind": "property",

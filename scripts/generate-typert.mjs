@@ -1,8 +1,7 @@
 import { existsSync } from 'node:fs'
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const workspace = join(root, '.typert-workspace')
@@ -22,6 +21,11 @@ if (!existsSync(generatorPath) || !existsSync(protocolSrc) || !existsSync(protoc
   )
 }
 
+/** Reuse this repo's own compiler options so the analyzed types match `pnpm typecheck`.
+ *  Only the workspace layout differs: composite references, no emit, and rewritten paths. */
+const ownCompilerOptions = JSON.parse(await readFile(join(root, 'tsconfig.json'), 'utf8')).compilerOptions
+const { baseUrl: _baseUrl, rootDir: _rootDir, paths: _paths, ...sharedCompilerOptions } = ownCompilerOptions
+
 const hostTsconfig = `{
   "extends": "./tsconfig.base.json",
   "files": [],
@@ -32,30 +36,17 @@ const hostTsconfig = `{
 }
 `
 
-const baseTsconfig = `{
-  "compilerOptions": {
-    "target": "ES2023",
-    "jsx": "react-jsx",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "skipLibCheck": true,
-    "verbatimModuleSyntax": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node"],
-    "ignoreDeprecations": "6.0",
-    "composite": true,
-    "noEmit": true,
-    "paths": {
-      "@deepseek-ai/dsh-typert-protocol": ["./packages/typert/protocol/src/index.ts"],
-      "@shengsheng/dsh-taskboard/domain": ["./packages/taskboard/src/domain/index.ts"]
-    }
-  }
-}
+const baseTsconfig = `${JSON.stringify({
+  compilerOptions: {
+    ...sharedCompilerOptions,
+    composite: true,
+    noEmit: true,
+    paths: {
+      '@deepseek-ai/dsh-typert-protocol': ['./packages/typert/protocol/src/index.ts'],
+      '@shengsheng/dsh-taskboard/domain': ['./packages/taskboard/src/domain/index.ts'],
+    },
+  },
+}, null, 2)}
 `
 
 const packageTsconfig = `{
@@ -76,6 +67,25 @@ const protocolTsconfig = `{
   "include": ["src/**/*.ts"]
 }
 `
+
+/** Emit `schema` next to every `create()` factory so one artifact loads on both Host generations.
+ *  Harness at published 0.1.6-alpha.1 reads `codec.schema`; the newer loader reads `codec.create()`.
+ *  The accessor keeps the factory's materialize-on-first-use behaviour for the legacy field too. */
+function withLegacySchemaField(js) {
+  const factories = /^(\s*)create: ([\w$]+),$/gm
+  const patched = js.replace(factories, '$1create: $2,\n$1get schema() { return $2() },')
+  const added = patched.split('\n').length - js.split('\n').length
+  if (added === 0) throw new Error('typert generator emitted no create() factories to mirror as schema')
+  return { js: patched, added }
+}
+
+/** A codec that analyzed as `any` validates nothing at the Host boundary. The synthetic
+ *  workspace resolves no peer packages, so an unresolved type would degrade silently. */
+function assertNoDegradedCodecs(js, label) {
+  if (js.includes('z.any(')) {
+    throw new Error(`${label} contains z.any() — a type failed to resolve in the synthetic workspace`)
+  }
+}
 
 await rm(workspace, { recursive: true, force: true })
 await mkdir(packageDir, { recursive: true })
@@ -106,13 +116,22 @@ try {
     throw new Error('typert generator did not emit Host-for-Client Remote artifacts')
   }
 
+  assertNoDegradedCodecs(host.js, 'typert.host.js')
+  assertNoDegradedCodecs(host.remote.js, 'typert.remote-client.js')
+  const hostJs = withLegacySchemaField(host.js)
+  const remoteJs = withLegacySchemaField(host.remote.js)
+
+  const files = {
+    'typert.host.js': hostJs.js,
+    'typert.host.d.ts': host.dts,
+    'typert.remote-client.js': remoteJs.js,
+    'typert.remote-client.d.ts': host.remote.dts,
+    'typert.remote-client.d.ts.map': host.remote.dtsMap,
+  }
   await mkdir(generated, { recursive: true })
-  await writeFile(join(generated, 'typert.host.js'), host.js)
-  await writeFile(join(generated, 'typert.host.d.ts'), host.dts)
-  await writeFile(join(generated, 'typert.remote-client.js'), host.remote.js)
-  await writeFile(join(generated, 'typert.remote-client.d.ts'), host.remote.dts)
-  await writeFile(join(generated, 'typert.remote-client.d.ts.map'), host.remote.dtsMap)
-  console.log(`generated ${String(artifacts.length)} Typert artifact(s) from ${generatorPath}`)
+  await Promise.all(Object.entries(files).map(([name, contents]) => writeFile(join(generated, name), contents)))
+  console.log(`wrote ${Object.keys(files).length} Typert artifact(s) to ${generated} from ${generatorPath}`)
+  console.log(`mirrored ${hostJs.added + remoteJs.added} create() factories as legacy schema accessors`)
 } finally {
   if (!keepWorkspace) await rm(workspace, { recursive: true, force: true })
 }

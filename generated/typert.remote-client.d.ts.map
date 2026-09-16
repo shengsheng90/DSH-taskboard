@@ -1,1 +1,1 @@
-{"version":3,"file":"typert.remote-client.d.ts","names":["mutate","snapshot","taskDetail"],"sources":["../src/service/index.ts"],"sourcesContent":[null],"mappings":";;;;;;;;;IAkZQA,M;IAVNC,Q;IAKAC,U;;;IAKMF,kB;IAVNC,oB;IAKAC,sB","ignoreList":[]}
+{"version":3,"file":"typert.remote-client.d.ts","names":["mutate","snapshot","taskDetail"],"sources":["../src/service/index.ts"],"sourcesContent":[null],"mappings":";;;;;;;;;IAoZQA,M;IAVNC,Q;IAKAC,U;;;IAKMF,kB;IAVNC,oB;IAKAC,sB","ignoreList":[]}

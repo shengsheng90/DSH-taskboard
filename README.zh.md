@@ -386,7 +386,9 @@ pnpm build
 pnpm example
 ```
 
-`pnpm build` 会编译 Host 声明与运行时、复制已入库的 Typert 生成物，并产出浏览器 bundle。生成的 Remote 文件留在 `generated/`，因此树外构建不依赖旁边的 Harness checkout。维护者可用 `pnpm generate:typert` 对照本地 DeepSeek Harness checkout（默认 `../deepseek-harness`）重新生成这些文件。
+`pnpm build` 会编译 Host 声明与运行时、复制已入库的 Typert 生成物，并产出浏览器 bundle。生成的 Remote 文件留在 `generated/`，因此树外构建不依赖旁边的 Harness checkout。
+
+维护者可用 `pnpm generate:typert` 对照本地 DeepSeek Harness checkout 重新生成这些文件，默认路径为 `../deepseek-harness`，也可用 `DSH_HARNESS_ROOT` 指定。该 checkout 必须新到已要求 `create()` codec 工厂；较旧的 checkout 仍会产出工厂之前的形状，覆盖 `generated/` 之后 `pnpm test` 会直接拒绝。设置 `KEEP_TYPERT_WORKSPACE=1` 可保留临时生成的 `.typert-workspace/` 以便排查。每个生成的 codec 同时带 `create()` 工厂和 `schema` 访问器，二者返回同一个惰性缓存的 schema，因此同一份产物既能在读取 `codec.schema` 的 Harness `0.1.6-alpha.1` 上加载，也能在读取 `codec.create()` 的新版本上加载。
 
 `pnpm check` 会连续跑 typecheck、测试和构建。
 

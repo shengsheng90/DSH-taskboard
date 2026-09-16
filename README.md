@@ -388,7 +388,9 @@ pnpm build
 pnpm example
 ```
 
-`pnpm build` compiles Host declarations and runtime, copies the checked Typert artifacts, and produces the browser bundle. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout. Maintainers regenerate those files with `pnpm generate:typert` against a local DeepSeek Harness checkout (default `../deepseek-harness`).
+`pnpm build` compiles Host declarations and runtime, copies the checked Typert artifacts, and produces the browser bundle. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout.
+
+Maintainers regenerate those files with `pnpm generate:typert` against a local DeepSeek Harness checkout — `../deepseek-harness` by default, or wherever `DSH_HARNESS_ROOT` points. That checkout must be recent enough to require `create()` codec factories; an older one still emits the pre-factory shape and would overwrite `generated/` with artifacts `pnpm test` then rejects. Set `KEEP_TYPERT_WORKSPACE=1` to leave the synthetic `.typert-workspace/` in place for inspection. Every generated codec carries a `create()` factory *and* a `schema` accessor that materializes the same memoized schema, so one artifact loads both on Harness `0.1.6-alpha.1` (which reads `codec.schema`) and on newer builds (which read `codec.create()`).
 
 `pnpm check` runs typecheck, tests, and build.
 

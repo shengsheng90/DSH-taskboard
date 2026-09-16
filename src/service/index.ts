@@ -227,6 +227,8 @@ export class TaskboardService extends TypertRemoteService {
   private readonly hostCtx: Context
   readonly config: ResolvedTaskboardConfig
   readonly provider: SqliteTaskboardProvider
+  /** Annotated although TypeScript infers it: the Typert generator reads declaration text into
+   *  `TYPERT.model`, and an inferred member emits a signature the Host catalog cannot resolve. */
   readonly workflowNodes: WorkflowNodeRegistry = new WorkflowNodeRegistry()
   readonly attachmentRoutes: TaskboardAttachmentRoutes
   private workflowSkills: Array<{ name: string; description: string }> = []
