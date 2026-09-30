@@ -26,5 +26,31 @@ jobs:
           cache: true
           install: false
       - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:package
       - run: pnpm check
+      - run: git diff --exit-code -- lib && test -z "$(git ls-files --others --exclude-standard lib)"
+      - run: pnpm test:package
       - run: pnpm example
+
+  compatibility:
+    name: Harness ${{ matrix.harness }} / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [0.1.7-rc.1, 0.1.7-rc.2, 0.2.0-rc.1, 0.2.0-rc.2]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/setup@v1
+        with:
+          runtime: node@${{ matrix.node }}
+          install: false
+      - run: pnpm install --frozen-lockfile
+      - run: npm install --prefix "$RUNNER_TEMP/harness" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@${{ matrix.harness }}
+      - run: npm install --prefix "$RUNNER_TEMP/consumer-pnpm" --no-audit --no-fund pnpm@${{ matrix.node == 24 && '12.6.0' || '11.15.1' }}
+      - run: node scripts/smoke-package.mjs
+        env:
+          DSH_SMOKE_RUNTIME: ${{ runner.temp }}/harness
+          PNPM_CONSUMER_COMMAND: ${{ runner.temp }}/consumer-pnpm/node_modules/.bin/pnpm

@@ -8,6 +8,10 @@ importers:
 
   .:
     dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.2
         version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
@@ -71,13 +75,6 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.2
         version: 3.18.2
-      react:
-        specifier: ^18.2.0
-        version: 18.3.1
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
       '@types/node':
         specifier: ^22.20.0
         version: 22.20.1
@@ -87,6 +84,9 @@ importers:
       '@types/react-dom':
         specifier: ^18.3.7
         version: 18.3.7(@types/react@18.3.31)
+      react:
+        specifier: ^18.2.0
+        version: 18.3.1
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
