@@ -9,11 +9,11 @@ This README is written so a human **or another coding agent** can install the pl
 **Package:** `@shengsheng/dsh-taskboard`  
 **Repository:** https://github.com/shengsheng90/DSH-taskboard  
 **License:** Apache-2.0  
-**Compatible Host:** DeepSeek Harness `0.1.6-alpha.1`
+**Compatible Host:** DeepSeek Harness `0.1.6-alpha.1` and the `0.1.7` release train (including prereleases)
 
 ![Native Taskboard board, task detail, and workflow views](docs/assets/taskboard-demo.gif)
 
-If you are an installing agent, jump to [Install into DeepSeek Harness](#install-into-deepseek-harness) and follow every step in order. Do **not** add this Git repository as a raw plugin source: `lib/` is gitignored, so a git install has no compiled Host/Client bundle.
+If you are an installing agent, jump to [Install into DeepSeek Harness](#install-into-deepseek-harness) and follow every step in order. Git, npm, and release tarballs carry prebuilt Host/Client artifacts. Installation requires neither a TypeScript build nor a Harness source checkout.
 
 ## What you get
 
@@ -37,7 +37,7 @@ Further design docs: [Architecture](docs/architecture.md), [Security and recover
 |---|---|
 | Node.js | `^22.19.0` or `>=24.0.0` (24 recommended; built-in `node:sqlite`) |
 | pnpm | `11` (`packageManager` is `pnpm@11.15.1`) |
-| DeepSeek Harness | `0.1.6-alpha.1` checkout or installation, **web** profile |
+| DeepSeek Harness | `0.1.6-alpha.1` or `0.1.7` checkout or installation, **web** profile |
 | Network | only needed to clone this repo and install Node dependencies |
 | Permissions | write access to `$DSH_HOME` (default `~/.dsh`) and the ability to restart the Harness process |
 
@@ -84,30 +84,17 @@ Decide how to invoke the `dsh` CLI:
 
 In the commands below, `dsh` means whichever of those two forms you just chose. First use of a profile may initialize it and install `@deepseek-ai/dsh-base`.
 
-### 2. Build a packed plugin (required)
+### 2. Choose a prebuilt installation source
 
-`lib/` is not in git. Always build, then pack. Installing the raw git tree or an unbuilt working copy will produce a package without Host/Client output.
+Use npm, Git (which includes `lib/`), or a GitHub release `.tgz`:
 
 ```sh
-git clone https://github.com/shengsheng90/DSH-taskboard.git
-cd DSH-taskboard
-pnpm install
-pnpm build
-pnpm pack
+dsh plugin --profile web add -w @shengsheng/dsh-taskboard
+# Alternatively:
+dsh plugin --profile web add -w git+https://github.com/shengsheng90/DSH-taskboard.git
 ```
 
-Expected artifacts:
-
-- `lib/index.js`, `lib/cli.js`, `lib/client.js` (and sibling declarations)
-- `shengsheng-dsh-taskboard-<version>.tgz` in the repo root
-
-Record the absolute tarball path. Example:
-
-```text
-/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-<version>.tgz
-```
-
-If this repository is already cloned and dependencies are installed, `pnpm build && pnpm pack` is enough. Optional local checks: `pnpm typecheck`, `pnpm test`, `pnpm example`.
+For the local tarball path in step 3, download a release `.tgz` and record its absolute path. Developers changing source run `pnpm install --frozen-lockfile && pnpm build && pnpm pack:release`. Consumer installation does not run a build. Release checks and CI validate completeness, source freshness, and compatibility. See [distribution and compatibility strategy](docs/plugin-compatibility.zh.md) for the verification boundaries.
 
 ### 3. Add the plugin to the profile
 
@@ -117,7 +104,7 @@ The profile directory is a pnpm workspace root (`packages: [.]`). The `-w` / wor
 dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
-Prefer the packed tarball over the source directory. A source-directory add can miss `lib/` if the tree was not built.
+If you already installed through npm or Git in step 2, skip this step and continue to composition verification. Rebuild and run `pnpm verify:package` before installing a source checkout with local changes.
 
 This command may rewrite the profile `package.json`, lockfile, and `node_modules`. That is expected.
 
@@ -216,7 +203,8 @@ Those defaults are **relative**, and a Host inherits its working directory from 
 |---|---|---|
 | `dsh: command not found` | CLI not on `PATH` | From a Harness checkout root, use `pnpm dsh ...` |
 | `ERR_PNPM_ADDING_TO_ROOT` | profile is a pnpm workspace root | Add `-w` |
-| git / directory install has no `lib/` | `lib/` is gitignored | `pnpm build && pnpm pack`, then add the `.tgz` |
+| Old Git ref / package lacks `lib/` | Old distribution omitted artifacts | Use a new prebuilt version; maintainers run `pnpm build && pnpm pack:release` |
+| `incompatible with dsh` | Old package or Host outside peer range | Upgrade the plugin and check supported versions; do not automatically grant version exemptions |
 | `EPERM` writing `~/.dsh` | sandbox | Ask the operator for full permissions; the write is idempotent |
 | Manifest / `client.js` still 404 | no restart, or checked too early | Restart, then poll (step 7) |
 | Import / apply error | missing peers or missing bundle entry | Heal fallbacks with `--dump-config`; confirm `dsh.profile.bundles` |
@@ -388,7 +376,7 @@ pnpm build
 pnpm example
 ```
 
-`pnpm build` compiles Host declarations and runtime, copies the checked Typert artifacts, and produces the browser bundle. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout.
+`pnpm build` cleans and rebuilds `lib/`, compiles Host declarations and runtime, copies the checked Typert artifacts, and produces the browser bundle and build fingerprint. Commit `lib/` with source changes (except JS sourcemaps), then run `pnpm verify:package`, `pnpm test:package`, and `pnpm pack:release`. Generated Remote files stay in `generated/` so an out-of-tree build does not need an adjacent Harness checkout.
 
 Maintainers regenerate those files with `pnpm generate:typert` against a local DeepSeek Harness checkout — `../deepseek-harness` by default, or wherever `DSH_HARNESS_ROOT` points. That checkout must be recent enough to require `create()` codec factories; an older one still emits the pre-factory shape and would overwrite `generated/` with artifacts `pnpm test` then rejects. Set `KEEP_TYPERT_WORKSPACE=1` to leave the synthetic `.typert-workspace/` in place for inspection. Every generated codec carries a `create()` factory *and* a `schema` accessor that materializes the same memoized schema, so one artifact loads both on Harness `0.1.6-alpha.1` (which reads `codec.schema`) and on newer builds (which read `codec.create()`).
 

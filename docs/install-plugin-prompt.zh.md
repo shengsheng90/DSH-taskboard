@@ -28,7 +28,7 @@
    - 若 harness 的 cwd 是 DSH 源码 checkout（根目录含 `pnpm-workspace.yaml`，package.json 有 `"dsh"` script）→ 后续命令在 checkout 根目录用 `pnpm dsh ...`；
    - 若 `which dsh` 有结果 → 直接 `dsh ...`。
 3. 确认插件源存在：`ls -la {{PLUGIN_SOURCE}}`。
-   - 若是**源码目录**且还没有打包产物：在插件目录执行 `pnpm build && pnpm pack` 生成 tgz（安装预构建产物，避免 git 安装缺 `lib/` 的坑）；已有 tgz 直接用。
+   - 若是**源码目录**且还没有打包产物：本仓库已提交 `lib/`；修改源码时在插件目录执行 `pnpm build && pnpm pack:release` 生成 tgz。npm、Git 或已有 tgz 可直接安装，无需在消费者环境编译。
 
 ### 第 2 步：安装到 profile
 

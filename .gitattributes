@@ -12,3 +12,6 @@
 *.webp binary
 *.ico binary
 *.tgz binary
+
+# Preserve compiler/bundler formatting in committed distribution artifacts.
+lib/** -whitespace

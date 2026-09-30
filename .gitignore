@@ -12,7 +12,7 @@ xy-shengsheng.pub
 .pnpm-store/
 .typert-workspace/
 node_modules/
-lib/
+lib/**/*.js.map
 *.tgz
 
 # Machine-local editor/tooling state (repo must be self-contained; a global

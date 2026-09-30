@@ -9,11 +9,11 @@
 **包名：** `@shengsheng/dsh-taskboard`  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
-**兼容 Host：** DeepSeek Harness `0.1.6-alpha.1`
+**兼容 Host：** DeepSeek Harness `0.1.6-alpha.1` 与 `0.1.7` 系列（含预发布版）
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
-若你是负责安装的代理，直接从 [安装到 DeepSeek Harness](#安装到-deepseek-harness) 按步执行。**不要**把本仓库当作未构建的 git 依赖安装：`lib/` 已被 gitignore，git 安装不会带上编译后的 Host/Client 产物。
+若你是负责安装的代理，直接从 [安装到 DeepSeek Harness](#安装到-deepseek-harness) 按步执行。Git、npm 和 release tarball 均携带已构建的 Host/Client 产物，安装时无需 TypeScript 编译或 Harness 源码 checkout。
 
 ## 安装后会得到什么
 
@@ -37,7 +37,7 @@ Agent 只能把已验证工作提交到 `in_review`；只有经过认证的用�
 |---|---|
 | Node.js | `^22.19.0` 或 `>=24.0.0`（推荐 24；使用内置 `node:sqlite`） |
 | pnpm | `11`（`packageManager` 为 `pnpm@11.15.1`） |
-| DeepSeek Harness | `0.1.6-alpha.1` 的 checkout 或安装，**web** profile |
+| DeepSeek Harness | `0.1.6-alpha.1` 或 `0.1.7` 系列的 checkout 或安装，**web** profile |
 | 网络 | 仅克隆本仓库和安装 Node 依赖时需要 |
 | 权限 | 可写 `$DSH_HOME`（默认 `~/.dsh`），并能重启 Harness 进程 |
 
@@ -84,30 +84,17 @@ lsof -p <PID> -a -d cwd
 
 下文的 `dsh` 均指上一步判定的那种形式。首次使用某个 profile 时会自动初始化，并打底 `@deepseek-ai/dsh-base`。
 
-### 2. 构建并打包（必须）
+### 2. 选择预构建安装来源
 
-`lib/` 不在 git 中。必须先 build，再 pack。把未构建的 git 树或工作副本直接加进 profile，会得到没有 Host/Client 产物的包。
+推荐 npm 包，也可以使用 Git（已包含 `lib/`）或 GitHub release 的 `.tgz`：
 
 ```sh
-git clone https://github.com/shengsheng90/DSH-taskboard.git
-cd DSH-taskboard
-pnpm install
-pnpm build
-pnpm pack
+dsh plugin --profile web add -w @shengsheng/dsh-taskboard
+# 或：
+dsh plugin --profile web add -w git+https://github.com/shengsheng90/DSH-taskboard.git
 ```
 
-预期产物：
-
-- `lib/index.js`、`lib/cli.js`、`lib/client.js`（及对应声明文件）
-- 仓库根目录的 `shengsheng-dsh-taskboard-<version>.tgz`
-
-记下 tarball 的绝对路径，例如：
-
-```text
-/absolute/path/to/DSH-taskboard/shengsheng-dsh-taskboard-<version>.tgz
-```
-
-若仓库已经克隆且依赖已安装，执行 `pnpm build && pnpm pack` 即可。可选本地检查：`pnpm typecheck`、`pnpm test`、`pnpm example`。
+使用下面第 3 步的本地 tarball 方式时，下载 release `.tgz` 并记录绝对路径。开发者修改源码后才需要在源码目录运行 `pnpm install --frozen-lockfile && pnpm build && pnpm pack:release`。发布包安装不运行构建脚本；完整性与兼容性由发布前检查和 CI 验证。方案和验证边界见 [插件分发与兼容策略](docs/plugin-compatibility.zh.md)。
 
 ### 3. 把插件加到 profile
 
@@ -117,7 +104,7 @@ profile 目录是 pnpm workspace 根（`packages: [.]`）。**必须**带 `-w`�
 dsh plugin --profile web add -w /absolute/path/to/shengsheng-dsh-taskboard-<version>.tgz
 ```
 
-优先安装打包后的 tarball，不要直接加源码目录。源码目录若未 build，会缺 `lib/`。
+若已用第 2 步的 npm 或 Git 命令安装，跳过本步，继续组成验证。安装本地源码前，若修改过源码，先重建并通过 `pnpm verify:package`。
 
 该命令可能改写 profile 的 `package.json`、lockfile 和 `node_modules`，这是预期行为。
 
@@ -216,7 +203,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 |---|---|---|
 | `dsh: command not found` | CLI 未入 `PATH` | 在 Harness checkout 根目录用 `pnpm dsh ...` |
 | `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace 根 | 命令加 `-w` |
-| git / 目录安装没有 `lib/` | `lib/` 被 gitignore | `pnpm build && pnpm pack`，再添加 `.tgz` |
+| 旧 Git ref / 包缺少 `lib/` | 旧版本没有分发产物 | 使用包含预构建产物的新版本；维护者运行 `pnpm build && pnpm pack:release` |
+| `incompatible with dsh` | 安装旧包或 Host 超出版本范围 | 升级插件并核对支持范围，不要自动设置版本豁免 |
 | 写 `~/.dsh` 报 `EPERM` | 沙箱限制 | 向操作者申请完整权限；该写作为幂等重写 |
 | manifest / `client.js` 仍 404 | 未重启，或验证过早 | 重启后按第 7 步轮询 |
 | 导入 / apply 报错 | peer 缺失或未进入 bundles | 用 `--dump-config` 修复回退链接；确认 `dsh.profile.bundles` |
@@ -386,7 +374,7 @@ pnpm build
 pnpm example
 ```
 
-`pnpm build` 会编译 Host 声明与运行时、复制已入库的 Typert 生成物，并产出浏览器 bundle。生成的 Remote 文件留在 `generated/`，因此树外构建不依赖旁边的 Harness checkout。
+`pnpm build` 会清空并重建 `lib/`，编译 Host 声明与运行时、复制已入库的 Typert 生成物，并产出浏览器 bundle 和构建指纹。维护者必须随源码提交 `lib/`（JS sourcemap 除外），并运行 `pnpm verify:package`、`pnpm test:package` 和 `pnpm pack:release`。生成的 Remote 文件留在 `generated/`，因此树外构建不依赖旁边的 Harness checkout。
 
 维护者可用 `pnpm generate:typert` 对照本地 DeepSeek Harness checkout 重新生成这些文件，默认路径为 `../deepseek-harness`，也可用 `DSH_HARNESS_ROOT` 指定。该 checkout 必须新到已要求 `create()` codec 工厂；较旧的 checkout 仍会产出工厂之前的形状，覆盖 `generated/` 之后 `pnpm test` 会直接拒绝。设置 `KEEP_TYPERT_WORKSPACE=1` 可保留临时生成的 `.typert-workspace/` 以便排查。每个生成的 codec 同时带 `create()` 工厂和 `schema` 访问器，二者返回同一个惰性缓存的 schema，因此同一份产物既能在读取 `codec.schema` 的 Harness `0.1.6-alpha.1` 上加载，也能在读取 `codec.create()` 的新版本上加载。
 
