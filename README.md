@@ -9,7 +9,7 @@ This README is written so a human **or another coding agent** can install the pl
 **Package:** `@shengsheng/dsh-taskboard`  
 **Repository:** https://github.com/shengsheng90/DSH-taskboard  
 **License:** Apache-2.0  
-**Compatible Host:** DeepSeek Harness `0.1.6-alpha.1` and the `0.1.7` / `0.2` release trains (including prereleases)
+**Host version policy:** DSH runtime peers use `*` (no version gate). Installation/loading is tested against `0.1.6-alpha.1`, `0.1.7-rc.1/rc.2`, and `0.2.0-rc.1/rc.2`.
 
 ![Native Taskboard board, task detail, and workflow views](docs/assets/taskboard-demo.gif)
 
@@ -37,7 +37,7 @@ Further design docs: [Architecture](docs/architecture.md), [Security and recover
 |---|---|
 | Node.js | `^22.19.0` or `>=24.0.0` (24 recommended; built-in `node:sqlite`) |
 | pnpm | `11` (`packageManager` is `pnpm@11.15.1`) |
-| DeepSeek Harness | `0.1.6-alpha.1`, `0.1.7`, or `0.2` checkout or installation, **web** profile |
+| DeepSeek Harness | checkout or installation, **web** profile; no DSH version constraint |
 | Network | only needed to clone this repo and install Node dependencies |
 | Permissions | write access to `$DSH_HOME` (default `~/.dsh`) and the ability to restart the Harness process |
 
@@ -204,7 +204,7 @@ Those defaults are **relative**, and a Host inherits its working directory from 
 | `dsh: command not found` | CLI not on `PATH` | From a Harness checkout root, use `pnpm dsh ...` |
 | `ERR_PNPM_ADDING_TO_ROOT` | profile is a pnpm workspace root | Add `-w` |
 | Old Git ref / package lacks `lib/` | Old distribution omitted artifacts | Use a new prebuilt version; maintainers run `pnpm build && pnpm pack:release` |
-| `incompatible with dsh` | Old package or Host outside peer range | Upgrade the plugin and check supported versions; do not automatically grant version exemptions |
+| `incompatible with dsh` | Old package still declares a bounded DSH range | Upgrade to the package with DSH peers set to `*`; actual API failures still need adaptation |
 | `EPERM` writing `~/.dsh` | sandbox | Ask the operator for full permissions; the write is idempotent |
 | Manifest / `client.js` still 404 | no restart, or checked too early | Restart, then poll (step 7) |
 | Import / apply error | missing peers or missing bundle entry | Heal fallbacks with `--dump-config`; confirm `dsh.profile.bundles` |

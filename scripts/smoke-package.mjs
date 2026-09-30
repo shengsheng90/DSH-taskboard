@@ -24,6 +24,9 @@ try {
   const installed = join(profile, 'node_modules/@shengsheng/dsh-taskboard')
   const installedPkg = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'))
   assert.equal(Object.keys(installedPkg.dependencies).join(), 'zod')
+  for (const [name, range] of Object.entries(installedPkg.peerDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(range, '*', `${name} must not gate installation by version`)
+  }
   assert.deepEqual((await readdir(join(profile, 'node_modules'))).filter(name => name === '@deepseek-ai' || name === 'react'), [])
   run('node', ['scripts/verify-package.mjs', `--root=${installed}`])
   // Prove the gate detects the original missing-entry-point failure and corrupted output.
@@ -39,12 +42,10 @@ try {
   const runtime = resolve(process.env.DSH_SMOKE_RUNTIME ?? root)
   if (process.env.DSH_SMOKE_RUNTIME) {
     const { evaluatePluginCompatibility } = await import(pathToFileURL(join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js')))
-    for (const version of ['0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.1', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7', '0.1.8', '0.2.0-alpha.1', '0.2.0-rc.1', '0.2.0-rc.2', '0.2.0', '0.2.1']) {
+    for (const version of ['0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.1', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7', '0.1.8', '0.2.0-alpha.1', '0.2.0-rc.1', '0.2.0-rc.2', '0.2.0', '0.2.1', '0.1.5', '0.3.0-rc.1', '0.3.0', '1.0.0', '2.0.0-rc.1']) {
       assert.equal(evaluatePluginCompatibility(installedPkg, {}, version), undefined, version)
     }
-    for (const version of ['0.1.5', '0.3.0-rc.1', '0.3.0', '1.0.0']) {
-      assert.ok(evaluatePluginCompatibility(installedPkg, {}, version), `must reject ${version}`)
-    }
+    assert.throws(() => evaluatePluginCompatibility(installedPkg, {}, 'not-a-version'))
     const bin = join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
     const env = { DSH_HOME: join(temp, 'dsh-home') }
     run('node', [bin, 'plugin', '--profile', 'web', 'add', '-w', tarball], temp, env)

@@ -9,7 +9,7 @@
 **包名：** `@shengsheng/dsh-taskboard`  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
-**兼容 Host：** DeepSeek Harness `0.1.6-alpha.1` 与 `0.1.7` / `0.2` 系列（含预发布版）
+**Host 版本策略：** DSH 运行时 peer 为 `*`，不按版本号拦截安装。已验证 `0.1.6-alpha.1`、`0.1.7-rc.1/rc.2` 和 `0.2.0-rc.1/rc.2` 的安装与加载。
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
@@ -37,7 +37,7 @@ Agent 只能把已验证工作提交到 `in_review`；只有经过认证的用�
 |---|---|
 | Node.js | `^22.19.0` 或 `>=24.0.0`（推荐 24；使用内置 `node:sqlite`） |
 | pnpm | `11`（`packageManager` 为 `pnpm@11.15.1`） |
-| DeepSeek Harness | `0.1.6-alpha.1`、`0.1.7` 或 `0.2` 系列的 checkout 或安装，**web** profile |
+| DeepSeek Harness | checkout 或安装，**web** profile；不限制 DSH 版本号 |
 | 网络 | 仅克隆本仓库和安装 Node 依赖时需要 |
 | 权限 | 可写 `$DSH_HOME`（默认 `~/.dsh`），并能重启 Harness 进程 |
 
@@ -204,7 +204,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 | `dsh: command not found` | CLI 未入 `PATH` | 在 Harness checkout 根目录用 `pnpm dsh ...` |
 | `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace 根 | 命令加 `-w` |
 | 旧 Git ref / 包缺少 `lib/` | 旧版本没有分发产物 | 使用包含预构建产物的新版本；维护者运行 `pnpm build && pnpm pack:release` |
-| `incompatible with dsh` | 安装旧包或 Host 超出版本范围 | 升级插件并核对支持范围，不要自动设置版本豁免 |
+| `incompatible with dsh` | 旧包仍声明有界的 DSH 版本范围 | 升级到 DSH peer 为 `*` 的新包；实际 API 错误仍需适配 |
 | 写 `~/.dsh` 报 `EPERM` | 沙箱限制 | 向操作者申请完整权限；该写作为幂等重写 |
 | manifest / `client.js` 仍 404 | 未重启，或验证过早 | 重启后按第 7 步轮询 |
 | 导入 / apply 报错 | peer 缺失或未进入 bundles | 用 `--dump-config` 修复回退链接；确认 `dsh.profile.bundles` |

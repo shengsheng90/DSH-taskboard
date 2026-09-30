@@ -11,7 +11,7 @@ Git 渠道另有独立缺陷：旧仓库忽略 `lib/`，没有消费者构建脚
 ## 本次方案
 
 1. **安装只消耗已构建产物。** 在源码仓库提交 `lib/`，npm 与 Git 使用同一份产物；不添加 prepare、prepack、install 等生命周期脚本。JS sourcemap 留作本地调试，不入库；声明文件和声明映射随包交付。
-2. **开发依赖和运行时契约分开。** 开发 SDK 固定在 `0.1.6-alpha.1` 并由 lockfile 锁定。运行时 peer 为 `^0.1.6-alpha.1 || ^0.1.7-0 || ^0.2.0-0`，允许 `0.1`、`0.2` 系列中兼容的小更新及 `0.1.7`、`0.2.0` 预发布版，排除 `0.3`。后两段显式接纳 rc/alpha，避免普通 SemVer 范围默认排除后续版本的预发布标签。
+2. **开发依赖和运行时契约分开。** 开发 SDK 固定在 `0.1.6-alpha.1` 并由 lockfile 锁定。所有 `@deepseek-ai/dsh-*` 运行时 peer 使用 `*`，不设置 Harness 版本的上下限。Harness 的兼容检查使用 `includePrerelease: true`，因此 alpha/rc 也不会仅因版本号被拒绝。回归测试核对安装包内的每个 DSH peer 为 `*`，并通过真实宿主的兼容检查覆盖旧版本、当前版本和未来主版本。
 3. **依赖由宿主提供。** peer 标记 optional，表示包管理器不要自动下载另一套 Harness/React；不表示这些运行时 API 可以缺失。插件仍依赖完整的 Harness web profile。Harness 会依据 peer 的版本声明执行自己的兼容检查，optional 不绕过该检查。普通 pnpm 安装也不会自动装入 SDK 或重复的 Cordis。
 4. **沿用协议兼容桥。** Typert codec 同时提供 `schema` 和 `create()`，两者共享惰性缓存。安装不重新生成 Typert 文件，也不修改上游 Harness。
 5. **发布前拦截不完整或过期产物。** `lib/build-manifest.json` 记录输入与输出的 SHA-256，忽略 Git 对文本换行的规范化。`pnpm verify:package` 检查公开入口、bundle patch、Skill、产物指纹和源码指纹。CI 在重建前检查已提交产物，重建后检查 `git diff --exit-code -- lib`；删除源码时先清空 lib，避免残留旧可执行文件。
@@ -39,4 +39,4 @@ git add src generated scripts package.json pnpm-lock.yaml lib
 
 设置 `DSH_SMOKE_RUNTIME` 为包含真实 `@deepseek-ai/dsh` 的安装目录时，还会运行真实 `dsh plugin add` 与 `--dump-config`，不设置版本豁免，再用该宿主的 SDK 执行模块冒烟。CI 覆盖固定开发基线，以及 Harness `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` 在 Node 22 / 24 下的安装与加载，消费者安装分别用 pnpm 11.15.1 / 12.6.0。真实 dsh CLI 使用其自带的 pnpm。
 
-这不是所有未来 `0.1.x` / `0.2.x` 的功能兼容保证。上游若改动 API、浏览器注入契约或执行接口，仍应增加适配并扩展测试。冒烟不代替完整 GUI 操作和真实模型自动化验收。宿主升级时，先以新版本运行这套矩阵；跨 `0.3` 的更新必须专门验证后才扩展 peer 范围。不要自动执行 `allow-version --accept-risk`，也不要吞掉构建失败继续发布缺产物的包。
+不再按 Harness 版本号拦截安装，不等于所有版本的 API 自动兼容。上游若改动 API、浏览器注入契约或执行接口，仍应增加适配并扩展测试。冒烟不代替完整 GUI 操作和真实模型自动化验收。宿主升级时，先以新版本运行这套矩阵，发现实际 API 差异时修复适配。不要自动执行 `allow-version --accept-risk`，也不要吞掉构建失败继续发布缺产物的包。
