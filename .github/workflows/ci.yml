@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        harness: [0.1.7-rc.1, 0.1.7-rc.2]
+        harness: [0.1.7-rc.1, 0.1.7-rc.2, 0.2.0-rc.1, 0.2.0-rc.2]
         node: [22, 24]
     steps:
       - uses: actions/checkout@v5

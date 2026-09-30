@@ -39,10 +39,10 @@ try {
   const runtime = resolve(process.env.DSH_SMOKE_RUNTIME ?? root)
   if (process.env.DSH_SMOKE_RUNTIME) {
     const { evaluatePluginCompatibility } = await import(pathToFileURL(join(runtime, 'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js')))
-    for (const version of ['0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.1', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7', '0.1.8']) {
+    for (const version of ['0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.1', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7', '0.1.8', '0.2.0-alpha.1', '0.2.0-rc.1', '0.2.0-rc.2', '0.2.0', '0.2.1']) {
       assert.equal(evaluatePluginCompatibility(installedPkg, {}, version), undefined, version)
     }
-    for (const version of ['0.1.5', '0.2.0-rc.1', '0.2.0', '1.0.0']) {
+    for (const version of ['0.1.5', '0.3.0-rc.1', '0.3.0', '1.0.0']) {
       assert.ok(evaluatePluginCompatibility(installedPkg, {}, version), `must reject ${version}`)
     }
     const bin = join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
