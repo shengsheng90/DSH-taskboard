@@ -20,7 +20,7 @@ import {
 } from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
-import type {} from '@deepseek-ai/dsh-client-connection'
+import { clientRequestSchema } from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
@@ -343,18 +343,39 @@ export class TaskboardService extends TypertRemoteService {
             send(res, 404, { error: 'not found' })
             return
           }
-          const endpoint = decodeURIComponent(pathname.slice('/taskboard/'.length))
+          let endpoint: string
+          try {
+            endpoint = decodeURIComponent(pathname.slice('/taskboard/'.length))
+          } catch {
+            send(res, 400, { error: 'invalid endpoint encoding' })
+            return
+          }
           const message = await readEnvelope(req)
           if (message === null || typeof message !== 'object') {
             send(res, 400, { error: 'body is not a request envelope' })
             return
           }
-          const envelope = message as { type?: unknown; rpcId?: unknown; method?: unknown; payload?: unknown }
-          if (envelope.type !== 'client-request' || typeof envelope.method !== 'string') {
-            send(res, 400, { error: 'body is not a request envelope' })
+          // Validate the complete carrier envelope before any business handler can write.
+          // In particular, a missing or non-string rpcId must never become a valid call.
+          const parsed = clientRequestSchema.safeParse(message)
+          if (!parsed.success) {
+            const rawId = (message as { rpcId?: unknown }).rpcId
+            send(res, 200, {
+              type: 'server-response',
+              rpcId: typeof rawId === 'string' ? rawId : 'invalid-request',
+              result: {
+                ok: false,
+                error: {
+                  code: 'gateway/bad-request',
+                  message: 'invalid client-request message',
+                  details: { issues: parsed.error.issues },
+                },
+              },
+            })
             return
           }
-          const rpcId = typeof envelope.rpcId === 'string' ? envelope.rpcId : ''
+          const envelope = parsed.data
+          const rpcId = envelope.rpcId
           if (envelope.method !== endpoint) {
             send(res, 200, {
               type: 'server-response',
