@@ -20,8 +20,9 @@ import {
 } from '../sqlite/index.js'
 import { WorkflowNodeRegistry } from '../workflow/index.js'
 import { TaskboardAttachmentRoutes } from './attachments.js'
-import type {} from '@deepseek-ai/dsh-client-connection'
+import { clientRequestSchema } from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -96,6 +97,10 @@ type RpcPayload = Record<string, unknown>
 /** Archived rows a snapshot carries for the dashboard's history section, budgeted separately from
  *  the live board so one cannot starve the other. */
 const ARCHIVED_SNAPSHOT_LIMIT = 200
+
+/** Largest `/taskboard` request envelope the channel reads before giving up on it. The board
+ *  sends small JSON payloads; attachment bytes travel through the capability-ticket route. */
+const MAX_RPC_BODY_BYTES = 8 * 1024 * 1024
 
 interface TaskboardRpcFailure {
   readonly code: string
@@ -274,17 +279,137 @@ export class TaskboardService extends TypertRemoteService {
         this.settleChangeWaiters(this.lastRevision, false)
       }
     }, 'taskboard: revision long-poll lifecycle')
-    ctx.inject(['connection'], (connectionCtx) => {
+    // `Connection.rpc.handle()` no longer mounts a channel on DSH 0.2.0-rc.2: it registers
+    // its route through a context that cannot resolve `webServer`, so the call throws
+    // `cannot get property "webServer" without inject` and `/taskboard` is never served.
+    // The board still loads — reads travel the Typert carrier — but every mutation fails
+    // silently, because the client half already POSTs to `/taskboard/<endpoint>` and simply
+    // finds no route. Mount that same channel on the web server directly, and keep
+    // Connection authoritative by asking it for the rejection verdict instead of
+    // re-deriving an authority this plugin deliberately does not carry.
+    ctx.inject(['connection', 'webServer'], (channelCtx) => {
       const handler: TaskboardRpcHandler = (endpoint, payload) => endpoint === 'automation.run-now'
         ? this.dispatchAutomationRunNow(payload)
         : Promise.resolve(this.dispatchHumanRpc(endpoint, payload, human('human:web-client')))
-      const rpc = connectionCtx.connection.rpc as unknown as {
-        handle(channel: string, handler: TaskboardRpcHandler): () => Promise<void>
+      const connection = channelCtx.connection as unknown as {
+        requestRejection(request: { headers: IncomingMessage['headers'] }): number | undefined
       }
-      connectionCtx.effect(
-        () => rpc.handle('/taskboard', handler),
-        'taskboard: Client RPC',
-      )
+      const webServer = channelCtx.webServer as unknown as {
+        register(route: {
+          kind: 'prefix'
+          path: string
+          handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+        }): () => void
+      }
+      const send = (res: ServerResponse, status: number, body: unknown): void => {
+        const text = JSON.stringify(body)
+        res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) })
+        res.end(text)
+      }
+      /** Read one bounded JSON envelope; an oversize or unparsable body yields undefined. */
+      const readEnvelope = (req: IncomingMessage): Promise<unknown> => new Promise(resolve => {
+        const chunks: Buffer[] = []
+        let size = 0
+        req.on('data', (chunk: Buffer) => {
+          size += chunk.length
+          if (size > MAX_RPC_BODY_BYTES) {
+            resolve(undefined)
+            req.destroy()
+            return
+          }
+          chunks.push(chunk)
+        })
+        req.on('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown)
+          } catch {
+            resolve(undefined)
+          }
+        })
+        req.on('error', () => { resolve(undefined) })
+      })
+      channelCtx.effect(() => webServer.register({
+        kind: 'prefix',
+        path: '/taskboard',
+        handler: async (req, res) => {
+          const rejection = connection.requestRejection(req)
+          if (rejection !== undefined) {
+            res.writeHead(rejection)
+            res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+            return
+          }
+          const pathname = (req.url ?? '').split('?')[0] ?? ''
+          if (req.method !== 'POST' || !pathname.startsWith('/taskboard/')) {
+            send(res, 404, { error: 'not found' })
+            return
+          }
+          let endpoint: string
+          try {
+            endpoint = decodeURIComponent(pathname.slice('/taskboard/'.length))
+          } catch {
+            send(res, 400, { error: 'invalid endpoint encoding' })
+            return
+          }
+          const message = await readEnvelope(req)
+          if (message === null || typeof message !== 'object') {
+            send(res, 400, { error: 'body is not a request envelope' })
+            return
+          }
+          // Validate the complete carrier envelope before any business handler can write.
+          // In particular, a missing or non-string rpcId must never become a valid call.
+          const parsed = clientRequestSchema.safeParse(message)
+          if (!parsed.success) {
+            const rawId = (message as { rpcId?: unknown }).rpcId
+            send(res, 200, {
+              type: 'server-response',
+              rpcId: typeof rawId === 'string' ? rawId : 'invalid-request',
+              result: {
+                ok: false,
+                error: {
+                  code: 'gateway/bad-request',
+                  message: 'invalid client-request message',
+                  details: { issues: parsed.error.issues },
+                },
+              },
+            })
+            return
+          }
+          const envelope = parsed.data
+          const rpcId = envelope.rpcId
+          if (envelope.method !== endpoint) {
+            send(res, 200, {
+              type: 'server-response',
+              rpcId,
+              result: {
+                ok: false,
+                error: {
+                  code: 'gateway/bad-request',
+                  message: `method ${JSON.stringify(envelope.method)} does not match endpoint ${JSON.stringify(endpoint)}`,
+                  details: {},
+                },
+              },
+            })
+            return
+          }
+          // A client that walks away must not leave the handler holding a slot.
+          const abort = new AbortController()
+          res.on('close', () => { abort.abort() })
+          let result: RpcResult<unknown>
+          try {
+            result = await handler(endpoint, envelope.payload, abort.signal)
+          } catch (error) {
+            result = {
+              ok: false,
+              error: {
+                code: error instanceof TaskboardError ? error.code : 'internal',
+                message: error instanceof Error ? error.message : String(error),
+                details: {},
+              },
+            }
+          }
+          send(res, 200, { type: 'server-response', rpcId, result })
+        },
+      }), 'taskboard: Client RPC')
     })
     ctx.inject(['webServer'], (webCtx) => {
       webCtx.effect(() => this.attachmentRoutes.mount(webCtx.webServer), 'taskboard: attachment byte route')
