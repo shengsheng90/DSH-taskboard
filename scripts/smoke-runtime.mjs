@@ -9,6 +9,7 @@ import * as plugin from '@shengsheng/dsh-taskboard'
 import { TYPERT } from '@shengsheng/dsh-taskboard/typert'
 import remote from '@shengsheng/dsh-taskboard/remote'
 import { runTaskboardCli } from '@shengsheng/dsh-taskboard/cli'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 
 const ctx = new Context()
 let cliOutput
@@ -32,6 +33,30 @@ try {
     }
   }
   const require = createRequire(import.meta.url)
+  // Exercise the actual new Host Session shape, not a mock with the removed events field.
+  const session = Session.create(SessionId('taskboard-smoke-session'))
+  if (!('events' in session)) {
+    const runtimeRequire = createRequire(require.resolve('@deepseek-ai/dsh-session'))
+    const { SessionProjectionRegistry } = await import(runtimeRequire.resolve('@deepseek-ai/dsh-session-projection'))
+    const { z } = await import(runtimeRequire.resolve('zod'))
+    const registry = new SessionProjectionRegistry(ctx)
+    const schema = z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed']) })).nullable()
+    registry.register({
+      key: 'todos', stateVersion: 1, stateSchema: schema, init: () => null,
+      apply: (state, event) => event.type === 'todo/write' ? event.data.todos : state,
+      wire: { viewSchema: schema, view: state => state },
+    })
+    const project = service.snapshot().projects[0]
+    let task = service.provider.createTask({ projectId: project.id, title: 'Native todo projection', creator: 'smoke', status: 'todo' }, { kind: 'human', actorId: 'smoke' })
+    task = service.provider.claim(task.id, { expectedVersion: task.version, sessionId: session.id, agentId: session.id }, {
+      kind: 'agent', actorId: session.id, sessionId: session.id, agentId: session.id,
+    }).task
+    ctx.provide('agents', { get: () => ({ status: 'running', session }) })
+    const todos = [{ content: 'Verify native progress', status: 'in_progress' }]
+    session.append('todo/write', { todos })
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime[0].todos, todos)
+    console.log('Native Session todo projection smoke passed')
+  }
   let registered
   vm.runInNewContext(readFileSync(require.resolve('@shengsheng/dsh-taskboard/client'), 'utf8'), {
     window: { __ModuleLoader__: { load: value => { registered = value } } },

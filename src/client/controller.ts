@@ -354,6 +354,13 @@ export function observeSnapshot<T>(source: {
   }
 }
 
+/** Own the draft scope until task binding succeeds and navigation takes over. */
+export interface PreparedTaskSession {
+  readonly sessionId: string
+  open(): void | Promise<void>
+  release(): void
+}
+
 /** Browser-local page state and route codec; business state always comes from the Host. */
 export class TaskboardClientController {
   private route = parseRoute()
@@ -367,7 +374,7 @@ export class TaskboardClientController {
     readonly connection: TaskboardConnection,
     private readonly remote: TaskboardRemoteNamespace,
     private readonly selectSession?: (sessionId: string) => void | Promise<void>,
-    private readonly createTaskSession?: (workspaceId: string, draft: string) => Promise<string>,
+    private readonly createTaskSession?: (workspaceId: string, draft: string) => Promise<PreparedTaskSession>,
   ) {
     if (typeof window !== 'undefined') window.addEventListener('hashchange', this.onRoute)
   }
@@ -431,15 +438,20 @@ export class TaskboardClientController {
 
   async openNewSession(workspaceId: string, detail: TaskDetail): Promise<string> {
     if (this.createTaskSession === undefined) throw new Error('native Session creation is unavailable')
-    const sessionId = await this.createTaskSession(workspaceId, renderTaskSessionDraft(detail))
-    await this.mutate('task.bind-session', {
-      taskId: detail.task.id,
-      expectedVersion: detail.task.version,
-      sessionId,
-      agentId: sessionId,
-    })
-    this.close()
-    return sessionId
+    const session = await this.createTaskSession(workspaceId, renderTaskSessionDraft(detail))
+    try {
+      await this.mutate('task.bind-session', {
+        taskId: detail.task.id,
+        expectedVersion: detail.task.version,
+        sessionId: session.sessionId,
+        agentId: session.sessionId,
+      })
+      await session.open()
+      this.close()
+      return session.sessionId
+    } finally {
+      session.release()
+    }
   }
 
   async mutate(endpoint: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {

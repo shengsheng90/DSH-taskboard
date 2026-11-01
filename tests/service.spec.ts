@@ -235,6 +235,55 @@ test('task detail projects live Agent status and durable todo progress without c
   }
 })
 
+test('0.2.1 task detail reads todo projections without touching removed Session.events', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  try {
+    const project = service.provider.createProject({ key: 'REV', name: 'Review' }, { kind: 'human', actorId: 'human' })
+    let task = service.provider.createTask({ projectId: project.id, title: 'Projection', creator: 'human', status: 'todo' }, { kind: 'human', actorId: 'human' })
+    task = service.provider.claim(task.id, { expectedVersion: task.version, sessionId: 'session-new', agentId: 'session-new' }, {
+      kind: 'agent', actorId: 'session-new', sessionId: 'session-new', agentId: 'session-new',
+    }).task
+    const session = { get events(): never { throw new Error('Session.events is not supported') } }
+    let live = true
+    let reads = 0
+    let todos: readonly { content: string; status: 'in_progress' }[] | null = [{ content: 'Keep real progress', status: 'in_progress' }]
+    ctx.provide('agents', { get: () => live ? { status: 'running', session } : undefined } as never)
+    ctx.provide('sessionProjections' as never, { snapshot: (value: unknown, keys: readonly string[]) => {
+      assert.equal(value, session)
+      assert.deepEqual(keys, ['todos'])
+      reads++
+      return { values: { todos } }
+    } } as never)
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime, [{ sessionId: 'session-new', status: 'running', current: true, todos }])
+    todos = []
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime?.[0]?.todos, [])
+    todos = null
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime?.[0]?.todos, [])
+    live = false
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime, [{ sessionId: 'session-new', status: 'offline', current: true, todos: [] }])
+    assert.equal(reads, 3)
+  } finally {
+    service.provider.close()
+  }
+})
+
+test('a live Session without an events array or todo projection does not poison task detail', () => {
+  const ctx = new Context()
+  const service = new TaskboardService(ctx, config)
+  try {
+    const project = service.provider.createProject({ key: 'REV', name: 'Review' }, { kind: 'human', actorId: 'human' })
+    let task = service.provider.createTask({ projectId: project.id, title: 'No todo plugin', creator: 'human', status: 'todo' }, { kind: 'human', actorId: 'human' })
+    task = service.provider.claim(task.id, { expectedVersion: task.version, sessionId: 'session-empty', agentId: 'session-empty' }, {
+      kind: 'agent', actorId: 'session-empty', sessionId: 'session-empty', agentId: 'session-empty',
+    }).task
+    ctx.provide('agents', { get: () => ({ status: 'idle', session: {} }) } as never)
+    assert.deepEqual(service.taskDetail(task.id).sessionRuntime, [{ sessionId: 'session-empty', status: 'idle', current: true, todos: [] }])
+  } finally {
+    service.provider.close()
+  }
+})
+
 test('snapshot discovers installed Skill and MCP capabilities without claiming they are executable', async () => {
   const ctx = new Context()
   const service = new TaskboardService(ctx, config)

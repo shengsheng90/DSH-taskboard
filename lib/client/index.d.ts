@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import { TaskboardClientController } from './controller.js';
+import type { PreparedTaskSession } from './controller.js';
 export { bindTaskboardLocale, taskboardStrings } from './locales.js';
 export declare const inject: string[];
 interface InjectedProps {
@@ -24,6 +25,29 @@ interface TaskSessionRow {
     readonly displayTitle?: string;
     readonly title?: string;
 }
+interface ISessions {
+    readonly list: {
+        getSnapshot(): {
+            readonly current?: string;
+            readonly byId: Readonly<Record<string, TaskSessionRow | undefined>>;
+        };
+        subscribe(listener: () => void): () => void;
+    };
+    refresh(): Promise<void>;
+    retain?(sessionId: string, options: {
+        source: 'controllerOperation';
+    }): {
+        readonly ready: Promise<{
+            readonly ctx: unknown;
+        }>;
+        release(): void;
+    };
+    scope(sessionId: string): unknown;
+}
+interface UiWorkspace {
+    connectWorkspace(workspaceId: string): Promise<string>;
+    openSession(sessionId: string): void;
+}
 interface PageInjectedProps extends InjectedProps {
     workspaces: IWorkspaces;
 }
@@ -36,9 +60,18 @@ interface TaskSessionNavigator {
     refresh(): Promise<void>;
     open(sessionId: string): void;
 }
-/** A disposed automation Agent becomes a persisted cold Session. Refresh the native list before
- *  selecting it: sessions.open intentionally rejects ids absent from the current list snapshot. */
+/** Refresh persisted Sessions before handing navigation to uiWorkspace. */
 export declare function openTaskSession(navigator: TaskSessionNavigator, sessionId: string): Promise<void>;
+/** Narrow structural face used at the plugin boundary; the service is provided by dsh-client-ui-conversation. */
+interface ConversationDraftPort {
+    readonly input: {
+        for(ctx: unknown): {
+            setDraft(text: string): void;
+        };
+    };
+}
+/** Retain the new scope before writing its draft; navigation follows the task bind. */
+export declare function prepareTaskSession(sessions: Pick<ISessions, 'retain' | 'scope'>, uiWorkspace: UiWorkspace, conversation: ConversationDraftPort, workspaceId: string, draft: string): Promise<PreparedTaskSession>;
 type NavProps = PropsRuntime<'sidebar.footer.action'> & InjectedProps;
 type PageProps = PropsRuntime<'shell.overlay'> & PageInjectedProps;
 export declare function TaskboardNavButton({ wide, controller }: NavProps): import("react").JSX.Element;
