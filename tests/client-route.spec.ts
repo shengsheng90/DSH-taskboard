@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, isProjectKey, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, suggestProjectKey, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
-import { openTaskSession, taskboardStrings } from '../src/client/index.js'
+import { openTaskSession, taskboardStrings, taskSessionLabel, workspaceLabel } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
 
 test('suggested project keys follow the whole name and stay server-valid', () => {
@@ -473,4 +473,39 @@ test('list view sorts enums by their real order, not alphabetically', () => {
   // Undated tasks sort last ascending rather than leading the page.
   const dated = [task('DSH-1', 'none', 'todo'), task('DSH-2', 'none', 'todo', '2026-01-05'), task('DSH-3', 'none', 'todo', '2026-01-01')]
   assert.deepEqual(sortTaskList(dated, 'dueDate').map(item => item.identifier), ['DSH-3', 'DSH-2', 'DSH-1'])
+})
+
+test('linked Sessions are named with the title the sidebar shows, never the raw Session id', () => {
+  // SessionSummary.displayTitle is the human-facing label the Session list renders:
+  // durable title, then project basename, then the id.
+  const catalog = {
+    byId: {
+      'session-one': { displayTitle: 'Create audio for task AUDIOD-2', title: 'Create audio for task AUDIOD-2' },
+      'session-two': { title: 'Durable title only' },
+      'session-three': { displayTitle: '   ', title: 'ignored' },
+    },
+  }
+  assert.equal(taskSessionLabel(catalog, 'session-one'), 'Create audio for task AUDIOD-2')
+  // A row without displayTitle still gets a readable name.
+  assert.equal(taskSessionLabel(catalog, 'session-two'), 'Durable title only')
+  // A blank title must not render an empty button.
+  assert.equal(taskSessionLabel(catalog, 'session-three'), 'session-three')
+  // A claim whose Session left the catalog, and a catalog still loading, keep the id instead of throwing.
+  assert.equal(taskSessionLabel(catalog, 'session-missing'), 'session-missing')
+  assert.equal(taskSessionLabel(undefined, 'session-one'), 'session-one')
+})
+
+test('the dashboard names the Workspace with its title, not the raw workspace id', () => {
+  const workspaces = [
+    { workspaceId: 'workspace-0f3a9c', title: 'DSH', path: '/mnt/data/DSH' },
+    { workspaceId: 'workspace-blank', title: '   ', path: '/mnt/data/Dados-PcDino/Segundo-cerebro/' },
+    { workspaceId: 'workspace-nopath', title: '' },
+  ]
+  assert.equal(workspaceLabel(workspaces, 'workspace-0f3a9c'), 'DSH')
+  // A blank title still yields something readable: the folder name, without the trailing slash.
+  assert.equal(workspaceLabel(workspaces, 'workspace-blank'), 'Segundo-cerebro')
+  // Nothing to name it with keeps the id rather than rendering an empty label.
+  assert.equal(workspaceLabel(workspaces, 'workspace-nopath'), 'workspace-nopath')
+  assert.equal(workspaceLabel(workspaces, 'workspace-missing'), 'workspace-missing')
+  assert.equal(workspaceLabel([], 'workspace-0f3a9c'), 'workspace-0f3a9c')
 })

@@ -44,9 +44,15 @@ interface IWorkspaces {
   }
 }
 
+/** Structural view of one Session catalog row, as the linked-session label reads it. */
+interface TaskSessionRow {
+  readonly displayTitle?: string
+  readonly title?: string
+}
+
 interface ISessions {
   readonly list: {
-    getSnapshot(): { readonly current?: string; readonly byId: Readonly<Record<string, unknown>> }
+    getSnapshot(): { readonly current?: string; readonly byId: Readonly<Record<string, TaskSessionRow | undefined>> }
     subscribe(listener: () => void): () => void
   }
   refresh(): Promise<void>
@@ -588,7 +594,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
               ? <div className="dsh-taskboard-empty"><p>{t.noProject}</p><ProjectCreate controller={controller} commit={commitMutation} workspaces={workspaceState.items} /></div>
               : <>
                 <TaskCreate project={selected} mutate={mutate} onCreated={taskId => { controller.select(selected.id, route.view, taskId) }} />
-                {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} mutate={mutate} />}
+                {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} workspaces={workspaceState.items} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} mutate={mutate} />}
                 {route.view === 'board' && <Board key={selected?.id ?? 'none'} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
                 {route.view === 'list' && <ListView tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} />}
                 {route.view === 'labels' && <LabelsView project={selected} tasks={visibleTasks} open={task => { controller.select(selected?.id, route.view, task.id) }} mutate={mutate} />}
@@ -764,10 +770,11 @@ function StorageHealthPanel({ storage, mutate }: {
   )
 }
 
-function Dashboard({ tasks, runs, project, storage, open, openLog, mutate }: {
+function Dashboard({ tasks, runs, project, workspaces, storage, open, openLog, mutate }: {
   tasks: readonly TaskboardTask[]
   runs: readonly AutomationRun[]
   project: TaskboardProject | undefined
+  workspaces: readonly WorkspaceOption[]
   storage: TaskboardSnapshot['storageHealth'] | undefined
   open: (task: TaskboardTask) => void
   openLog: () => void
@@ -786,7 +793,7 @@ function Dashboard({ tasks, runs, project, storage, open, openLog, mutate }: {
   const recentTasks = useMemo(() => [...tasks]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, 8), [tasks])
-  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${project.workspaceId}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.recentTasks}</h2>{recentTasks.length === 0 ? <p>{t.empty}</p> : recentTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{t[task.status]}</span></button>)}</section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <StorageHealthPanel storage={storage} mutate={mutate} />}<AutomationLog runs={runs} tasks={tasks} openLog={openLog} /></>
+  return <><div className="dsh-taskboard-dashboard">{(['todo', 'in_progress', 'in_review', 'blocked'] as const).map(status => <div key={status}><strong>{counts[status] ?? 0}</strong><span>{t[status]}</span></div>)}</div><section className="dsh-taskboard-summary"><h2>{project?.key ?? '—'} · {project?.name ?? t.project}</h2><span title={project?.workspaceId}>{project?.workspaceId === undefined ? t.globalProject : `${t.workspace}: ${workspaceLabel(workspaces, project.workspaceId)}`}</span><span>{project?.labels.length === 0 ? t.noProjectLabels : `${t.labels}: ${project?.labels.join(', ')}`}</span><span>{tasks.length} {t.tasksWord} · {counts['in_progress'] ?? 0} {t.activeWord} · {counts['in_review'] ?? 0} {t.in_review}</span></section><section className="dsh-taskboard-due"><h2>{t.recentTasks}</h2>{recentTasks.length === 0 ? <p>{t.empty}</p> : recentTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{t[task.status]}</span></button>)}</section><section className="dsh-taskboard-due"><h2>{t.due}</h2>{dueTasks.length === 0 ? <p>{t.empty}</p> : dueTasks.map(task => <button type="button" key={task.id} onClick={() => { open(task) }}><strong>{task.identifier} · {task.title}</strong><span>{task.dueDate} · {t[task.status]}</span></button>)}</section>{storage !== undefined && <StorageHealthPanel storage={storage} mutate={mutate} />}<AutomationLog runs={runs} tasks={tasks} openLog={openLog} /></>
 }
 
 function AutomationActions({ project, automations, defaults, mutate }: {
@@ -1237,8 +1244,40 @@ function WorkflowNodeCard({ node, tabId, edit, trigger = false }: { node: Workfl
   return <div className="dsh-taskboard-workflow-node" data-execution={node.execution}><strong>{node.kind}</strong><small>{node.execution === 'executable' ? t.executable : t.designOnly}</small>{!trigger && <div className="dsh-taskboard-workflow-node-actions"><button type="button" onClick={() => { edit('up', tabId, node.id) }}>↑</button><button type="button" onClick={() => { edit('down', tabId, node.id) }}>↓</button><button type="button" onClick={() => { edit('copy', tabId, node.id) }}>{t.copy}</button><button type="button" onClick={() => { edit('delete', tabId, node.id) }}>×</button>{node.kind === 'condition' && <><button type="button" onClick={() => { edit('true', tabId, node.id) }}>＋ {t.trueLabel}</button><button type="button" onClick={() => { edit('false', tabId, node.id) }}>＋ {t.falseLabel}</button></>}</div>}{node.steps?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}{(node.trueBranch !== undefined || node.falseBranch !== undefined) && <div className="dsh-taskboard-branches"><section><b>{t.trueLabel}</b>{node.trueBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section><section><b>{t.falseLabel}</b>{node.falseBranch?.map(child => <WorkflowNodeCard key={child.id} node={child} tabId={tabId} edit={edit} />)}</section></div>}</div>
 }
 
+/** Session catalog the Taskboard page projects; set by apply() before the slots mount. */
+type TaskSessionCatalog = { readonly byId: Readonly<Record<string, TaskSessionRow | undefined>> }
+
+let taskSessionList: ISessions['list'] | undefined
+
+/** Stable subscribe for the Session catalog, so a late title replaces the raw id. */
+function subscribeTaskSessionList(listener: () => void): () => void {
+  return taskSessionList === undefined ? () => {} : taskSessionList.subscribe(listener)
+}
+
+/** Current Session catalog snapshot (undefined only before apply() runs). */
+function getTaskSessionCatalog(): TaskSessionCatalog | undefined {
+  return taskSessionList === undefined ? undefined : taskSessionList.getSnapshot()
+}
+
+/** Name of the Workspace a project is bound to: its title, then the folder name, then the raw id. */
+export function workspaceLabel(workspaces: readonly WorkspaceOption[], workspaceId: string): string {
+  const workspace = workspaces.find(item => item.workspaceId === workspaceId)
+  const title = workspace?.title?.trim()
+  if (title !== undefined && title !== '') return title
+  const folder = workspace?.path?.split(/[\\/]/).filter(part => part !== '').at(-1)?.trim()
+  return folder !== undefined && folder !== '' ? folder : workspaceId
+}
+
+/** Label of one linked Session: the title the sidebar shows, otherwise the raw id. */
+export function taskSessionLabel(catalog: TaskSessionCatalog | undefined, sessionId: string): string {
+  const row = catalog?.byId?.[sessionId]
+  const title = row?.displayTitle ?? row?.title
+  return title === undefined || title.trim() === '' ? sessionId : title
+}
+
 function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => Promise<void>; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const t = useStrings()
+  const sessionCatalog = useSyncExternalStore(subscribeTaskSessionList, getTaskSessionCatalog)
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
   const [priority, setPriority] = useState(task.priority)
@@ -1522,7 +1561,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
               <button type="button" disabled={project?.workspaceId === undefined || (task.status !== 'todo' && task.status !== 'in_progress')} title={project?.workspaceId === undefined ? t.workspaceRequired : task.status !== 'todo' && task.status !== 'in_progress' ? t.sessionTaskMustBeActive : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
               {detail === undefined || detail.claims.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.claims.map(item => {
                 const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
-                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {item.sessionId}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
+                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" title={item.sessionId} onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {taskSessionLabel(sessionCatalog, item.sessionId)}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
               })}
             </MetaField>
             <div className="dsh-taskboard-actions">
@@ -1586,6 +1625,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   const unmountRemote = await remote.$mount(taskboardRemote)
   ctx.inject(['remote.taskboard', 'uiWorkspace'], (remoteCtx) => {
     const sessions = remoteCtx.get('sessions') as unknown as ISessions
+    taskSessionList = sessions.list
     const workspaces = remoteCtx.get('workspaces') as unknown as IWorkspaces
     const uiWorkspace = remoteCtx.get('uiWorkspace') as unknown as UiWorkspace
     const conversation = remoteCtx.get('conversation') as unknown as ConversationDraftPort

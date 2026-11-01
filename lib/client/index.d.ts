@@ -19,6 +19,11 @@ interface IWorkspaces {
         };
     };
 }
+/** Structural view of one Session catalog row, as the linked-session label reads it. */
+interface TaskSessionRow {
+    readonly displayTitle?: string;
+    readonly title?: string;
+}
 interface PageInjectedProps extends InjectedProps {
     workspaces: IWorkspaces;
 }
@@ -38,6 +43,14 @@ type NavProps = PropsRuntime<'sidebar.footer.action'> & InjectedProps;
 type PageProps = PropsRuntime<'shell.overlay'> & PageInjectedProps;
 export declare function TaskboardNavButton({ wide, controller }: NavProps): import("react").JSX.Element;
 export declare function TaskboardPage({ controller, workspaces }: PageProps): import("react").JSX.Element | null;
+/** Session catalog the Taskboard page projects; set by apply() before the slots mount. */
+type TaskSessionCatalog = {
+    readonly byId: Readonly<Record<string, TaskSessionRow | undefined>>;
+};
+/** Name of the Workspace a project is bound to: its title, then the folder name, then the raw id. */
+export declare function workspaceLabel(workspaces: readonly WorkspaceOption[], workspaceId: string): string;
+/** Label of one linked Session: the title the sidebar shows, otherwise the raw id. */
+export declare function taskSessionLabel(catalog: TaskSessionCatalog | undefined, sessionId: string): string;
 /** Browser plugin registration; generated Remote contribution and both slots unwind together. */
 export declare function apply(ctx: Context): Promise<() => Promise<void>>;
 //# sourceMappingURL=index.d.ts.map
