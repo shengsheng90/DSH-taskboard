@@ -244,7 +244,10 @@ test('explicit new Session creation carries an unsent task draft and returns the
     } } as never,
     {} as never,
     undefined,
-    (workspaceId, draft) => { captured = { workspaceId, draft }; return Promise.resolve('session-native') },
+    (workspaceId, draft) => {
+      captured = { workspaceId, draft }
+      return Promise.resolve({ sessionId: 'session-native', open: () => {}, release: () => {} })
+    },
   )
   const sessionId = await controller.openNewSession('workspace-one', {
     task: {
@@ -499,7 +502,7 @@ test('the dashboard names the Workspace with its title, not the raw workspace id
   const workspaces = [
     { workspaceId: 'workspace-0f3a9c', title: 'DSH', path: '/mnt/data/DSH' },
     { workspaceId: 'workspace-blank', title: '   ', path: '/mnt/data/Dados-PcDino/Segundo-cerebro/' },
-    { workspaceId: 'workspace-nopath', title: '' },
+    { workspaceId: 'workspace-nopath', title: '', path: '' },
   ]
   assert.equal(workspaceLabel(workspaces, 'workspace-0f3a9c'), 'DSH')
   // A blank title still yields something readable: the folder name, without the trailing slash.

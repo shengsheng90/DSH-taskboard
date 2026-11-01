@@ -150,6 +150,12 @@ export declare function observeSnapshot<T>(source: {
     subscribe(listener: () => void): () => void;
     getSnapshot(): T;
 };
+/** Own the draft scope until task binding succeeds and navigation takes over. */
+export interface PreparedTaskSession {
+    readonly sessionId: string;
+    open(): void | Promise<void>;
+    release(): void;
+}
 /** Browser-local page state and route codec; business state always comes from the Host. */
 export declare class TaskboardClientController {
     readonly connection: TaskboardConnection;
@@ -162,7 +168,7 @@ export declare class TaskboardClientController {
     /** Identifies this page's long-poll loop so the Host can release a waiter this page abandoned:
      *  an abort is local and never reaches the Host, so the old waiter held its slot until timeout. */
     private readonly watcherId;
-    constructor(connection: TaskboardConnection, remote: TaskboardRemoteNamespace, selectSession?: ((sessionId: string) => void | Promise<void>) | undefined, createTaskSession?: ((workspaceId: string, draft: string) => Promise<string>) | undefined);
+    constructor(connection: TaskboardConnection, remote: TaskboardRemoteNamespace, selectSession?: ((sessionId: string) => void | Promise<void>) | undefined, createTaskSession?: ((workspaceId: string, draft: string) => Promise<PreparedTaskSession>) | undefined);
     readonly subscribe: (listener: () => void) => (() => void);
     readonly getSnapshot: () => TaskboardRoute;
     open(): void;

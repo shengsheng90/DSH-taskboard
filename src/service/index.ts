@@ -94,6 +94,13 @@ type TaskboardRpcHandler = (
 
 type RpcPayload = Record<string, unknown>
 
+/** The optional projection service is supplied by newer Harness versions. */
+interface SessionTodoProjections {
+  snapshot(session: unknown, keys: readonly ['todos']): {
+    readonly values: { readonly todos?: TaskboardSessionRuntime['todos'] | null }
+  }
+}
+
 /** Archived rows a snapshot carries for the dashboard's history section, budgeted separately from
  *  the live board so one cannot starve the other. */
 const ARCHIVED_SNAPSHOT_LIMIT = 200
@@ -457,15 +464,21 @@ export class TaskboardService extends TypertRemoteService {
     const agents = this.hostCtx.get('agents') as undefined | {
       get(id: string): undefined | {
         status: 'idle' | 'running'
-        session: { events: ReadonlyArray<{ type: string; data: unknown }> }
+        session: { readonly events?: ReadonlyArray<{ type: string; data: unknown }> }
       }
     }
+    const projections = this.hostCtx.get('sessionProjections' as never) as unknown as SessionTodoProjections | undefined
     const sessionRuntime = detail.claims.map(claim => {
       const agent = agents?.get(claim.sessionId)
-      const todoEvent = agent?.session.events.findLast(event => event.type === 'todo/write')
-      const todos: TaskboardSessionRuntime['todos'] = todoEvent === undefined
-        ? []
-        : ((todoEvent.data as { todos?: TaskboardSessionRuntime['todos'] }).todos ?? [])
+      // 0.2.1 no longer exposes Session.events. Read its registered todo projection,
+      // preserving null (no writes yet) rather than reviving stale legacy events.
+      const projectedTodos = agent === undefined ? undefined : projections?.snapshot(agent.session, ['todos']).values.todos
+      const todoEvent = projectedTodos === undefined
+        ? agent?.session.events?.findLast(event => event.type === 'todo/write')
+        : undefined
+      const todos = projectedTodos !== undefined
+        ? projectedTodos ?? []
+        : ((todoEvent?.data as { todos?: TaskboardSessionRuntime['todos'] } | undefined)?.todos ?? [])
       const status: TaskboardSessionRuntime['status'] = agent?.status ?? 'offline'
       return {
         sessionId: claim.sessionId,

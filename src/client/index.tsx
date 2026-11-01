@@ -23,6 +23,7 @@ import {
   type TaskboardCopy, type TaskboardLocaleRuntime,
 } from './locales.js'
 import taskboardRemote from '../../generated/typert.remote-client.js'
+import type { PreparedTaskSession } from './controller.js'
 
 export { bindTaskboardLocale, taskboardStrings } from './locales.js'
 export const inject = ['slots', 'connection', 'sessions', 'workspaces', 'uiWorkspace', 'conversation', 'remote', 'locale']
@@ -56,7 +57,10 @@ interface ISessions {
     subscribe(listener: () => void): () => void
   }
   refresh(): Promise<void>
-  open(sessionId: string): void
+  retain?(sessionId: string, options: { source: 'controllerOperation' }): {
+    readonly ready: Promise<{ readonly ctx: unknown }>
+    release(): void
+  }
   scope(sessionId: string): unknown
 }
 
@@ -67,6 +71,7 @@ interface ISlots {
 
 interface UiWorkspace {
   connectWorkspace(workspaceId: string): Promise<string>
+  openSession(sessionId: string): void
 }
 
 interface PageInjectedProps extends InjectedProps {
@@ -79,8 +84,7 @@ interface TaskSessionNavigator {
   open(sessionId: string): void
 }
 
-/** A disposed automation Agent becomes a persisted cold Session. Refresh the native list before
- *  selecting it: sessions.open intentionally rejects ids absent from the current list snapshot. */
+/** Refresh persisted Sessions before handing navigation to uiWorkspace. */
 export async function openTaskSession(navigator: TaskSessionNavigator, sessionId: string): Promise<void> {
   if (navigator.list.getSnapshot().byId[sessionId] === undefined) await navigator.refresh()
   if (navigator.list.getSnapshot().byId[sessionId] === undefined) {
@@ -92,6 +96,32 @@ export async function openTaskSession(navigator: TaskSessionNavigator, sessionId
 /** Narrow structural face used at the plugin boundary; the service is provided by dsh-client-ui-conversation. */
 interface ConversationDraftPort {
   readonly input: { for(ctx: unknown): { setDraft(text: string): void } }
+}
+
+/** Retain the new scope before writing its draft; navigation follows the task bind. */
+export async function prepareTaskSession(
+  sessions: Pick<ISessions, 'retain' | 'scope'>,
+  uiWorkspace: UiWorkspace,
+  conversation: ConversationDraftPort,
+  workspaceId: string,
+  draft: string,
+): Promise<PreparedTaskSession> {
+  const sessionId = await uiWorkspace.connectWorkspace(workspaceId)
+  const reference = sessions.retain?.(sessionId, { source: 'controllerOperation' })
+  try {
+    // Older Harness versions materialize scopes from the catalog; 0.2.1 requires ownership.
+    const scoped = reference === undefined ? sessions.scope(sessionId) : (await reference.ready).ctx
+    if (scoped === undefined) throw new Error(`Unable to resolve the new Session ${sessionId}`)
+    conversation.input.for(scoped).setDraft(draft)
+    return {
+      sessionId,
+      open: () => { uiWorkspace.openSession(sessionId) },
+      release: () => { reference?.release() },
+    }
+  } catch (cause) {
+    reference?.release()
+    throw cause
+  }
 }
 
 type NavProps = PropsRuntime<'sidebar.footer.action'> & InjectedProps
@@ -334,6 +364,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const [snapshot, setSnapshot] = useState<TaskboardSnapshot>()
   const [detail, setDetail] = useState<TaskDetailData>()
   const [busy, setBusy] = useState(false)
+  const [sessionBusy, setSessionBusy] = useState(false)
+  const sessionInFlight = useRef(false)
   const [error, setError] = useState<string>()
   const [refreshKey, setRefreshKey] = useState(0)
   const [query, setQuery] = useState('')
@@ -486,6 +518,21 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   const selectedTask = tasks.find(task => task.id === route.taskId)
     ?? (detail !== undefined && detail.task.id === route.taskId ? detail.task : undefined)
   const refresh = (): void => { setRefreshKey(value => value + 1) }
+  const runSessionAction = async (action: () => Promise<unknown>): Promise<void> => {
+    if (sessionInFlight.current) return
+    sessionInFlight.current = true
+    setSessionBusy(true)
+    setError(undefined)
+    try {
+      await action()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      refresh()
+    } finally {
+      sessionInFlight.current = false
+      setSessionBusy(false)
+    }
+  }
   const closeDetail = (): void => {
     detailDirty.current = false
     setDiscardPrompt(false)
@@ -614,7 +661,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           </div>
         </div>
       </div>}
-      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} preview={id => controller.previewAttachmentUrl(id)} openSession={async sessionId => { setBusy(true); try { await controller.openSession(sessionId) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} openNewSession={async () => { if (selected?.workspaceId === undefined || detail === undefined) return; setBusy(true); try { await controller.openNewSession(selected.workspaceId, detail) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
+      {selectedTask !== undefined && <TaskDetail key={selectedTask.id} project={selected} task={selectedTask} tasks={tasks} workflows={snapshot?.workflows ?? []} detail={detail?.task.id === selectedTask.id ? detail : undefined} sessionBusy={sessionBusy} error={error} mutate={mutate} upload={async (file, commentId) => { setBusy(true); try { await controller.uploadAttachment(selectedTask.id, detail?.task.version ?? selectedTask.version, file, commentId); refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }} download={(id, filename) => controller.downloadAttachment(id, filename)} preview={id => controller.previewAttachmentUrl(id)} openSession={sessionId => runSessionAction(() => controller.openSession(sessionId))} openNewSession={async () => { if (selected?.workspaceId === undefined || detail?.task.id !== selectedTask.id) return; const workspaceId = selected.workspaceId; await runSessionAction(() => controller.openNewSession(workspaceId, detail)) }} close={requestCloseDetail} onDirtyChange={value => { detailDirty.current = value }} />}
     </div>
   )
 }
@@ -1275,7 +1322,7 @@ export function taskSessionLabel(catalog: TaskSessionCatalog | undefined, sessio
   return title === undefined || title.trim() === '' ? sessionId : title
 }
 
-function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => Promise<void>; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
+function TaskDetail({ project, task, tasks, workflows, detail, sessionBusy, error, mutate, upload, download, preview, openSession, openNewSession, close, onDirtyChange }: { project: TaskboardProject | undefined; task: TaskboardTask; tasks: readonly TaskboardTask[]; workflows: readonly SavedWorkflow[]; detail: TaskDetailData | undefined; sessionBusy: boolean; error: string | undefined; mutate: (endpoint: string, payload: Record<string, unknown>) => Promise<unknown>; upload: (file: File, commentId?: string) => Promise<void>; download: (attachmentId: string, filename: string) => Promise<void>; preview: (attachmentId: string) => Promise<string>; openSession: (sessionId: string) => Promise<void>; openNewSession: () => Promise<void>; close: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const t = useStrings()
   const sessionCatalog = useSyncExternalStore(subscribeTaskSessionList, getTaskSessionCatalog)
   const [title, setTitle] = useState(task.title)
@@ -1412,6 +1459,7 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
             <button type="button" className="dsh-taskboard-detail-close" aria-label={t.closeDetail} onClick={close}><CloseIcon size={14} /></button>
           </div>
         </header>
+        {error !== undefined && <div className="dsh-taskboard-error" role="alert">{error}</div>}
         <div className="dsh-taskboard-detail-columns">
           <div className="dsh-taskboard-detail-main">
             <section className="dsh-taskboard-body" aria-label={t.description}>
@@ -1558,10 +1606,10 @@ function TaskDetail({ project, task, tasks, workflows, detail, mutate, upload, d
               {developmentKind === 'worktree' && <input value={worktreePath} aria-label={t.worktreePath} placeholder={t.worktreePath} onChange={event => { setWorktreePath(event.target.value) }} />}
             </MetaField>
             <MetaField label={t.sessions}>
-              <button type="button" disabled={project?.workspaceId === undefined || (task.status !== 'todo' && task.status !== 'in_progress')} title={project?.workspaceId === undefined ? t.workspaceRequired : task.status !== 'todo' && task.status !== 'in_progress' ? t.sessionTaskMustBeActive : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
+              <button type="button" disabled={detail === undefined || sessionBusy || project?.workspaceId === undefined || (task.status !== 'todo' && task.status !== 'in_progress')} title={detail === undefined ? t.loading : project?.workspaceId === undefined ? t.workspaceRequired : task.status !== 'todo' && task.status !== 'in_progress' ? t.sessionTaskMustBeActive : undefined} onClick={() => { void openNewSession() }}>{t.newSession}</button>
               {detail === undefined || detail.claims.length === 0 ? <p className="dsh-taskboard-muted">{t.noneYet}</p> : detail.claims.map(item => {
                 const runtime = detail.sessionRuntime?.find(value => value.sessionId === item.sessionId)
-                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" title={item.sessionId} onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {taskSessionLabel(sessionCatalog, item.sessionId)}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
+                return <article key={item.id} className="dsh-taskboard-side-item"><button type="button" className="dsh-taskboard-link" disabled={sessionBusy} title={item.sessionId} onClick={() => { void openSession(item.sessionId) }}>{t.openSession}: {taskSessionLabel(sessionCatalog, item.sessionId)}</button><small>{item.state} · {runtime?.status ?? t.offline}{runtime?.current === true ? ` · ${t.current}` : ''}</small></article>
               })}
             </MetaField>
             <div className="dsh-taskboard-actions">
@@ -1633,20 +1681,13 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
     const sessionNavigator: TaskSessionNavigator = {
       list: { getSnapshot: () => sessions.list.getSnapshot() },
       refresh: () => sessions.refresh(),
-      open: sessionId => { sessions.open(sessionId) },
+      open: sessionId => { uiWorkspace.openSession(sessionId) },
     }
     const controller = new TaskboardClientController(
       connection,
       mountedRemote.taskboard,
       sessionId => openTaskSession(sessionNavigator, sessionId),
-      async (workspaceId, draft) => {
-        const sessionId = await uiWorkspace.connectWorkspace(workspaceId)
-        const scoped = sessions.scope(sessionId)
-        if (scoped === undefined) throw new Error(`Unable to resolve the new Session ${sessionId}`)
-        conversation.input.for(scoped).setDraft(draft)
-        sessions.open(sessionId)
-        return sessionId
-      },
+      (workspaceId, draft) => prepareTaskSession(sessions, uiWorkspace, conversation, workspaceId, draft),
     )
     // Close the page when the user navigates to another Session: the shell's
     // session navigation is store-based (not hash-based), so it never clears
