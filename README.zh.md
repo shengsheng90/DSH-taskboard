@@ -9,7 +9,7 @@
 **包名：** `@shengsheng/dsh-taskboard`  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
-**Host 版本策略：** DSH 运行时 peer 为 `*`，不按版本号拦截安装。已验证 `0.1.6-alpha.1`、`0.1.7-rc.1/rc.2` 和 `0.2.0-rc.1/rc.2` 的安装与加载。这些检查覆盖安装和模块加载；升级 Host 后仍需核对 GUI 操作和模型执行。
+**Host 版本策略：** DSH 运行时 peer 为 `*`，不按版本号拦截安装。已验证 `0.1.6-alpha.1`、`0.1.7-rc.1/rc.2`、`0.2.0-rc.1/rc.2` 和 `0.2.1-rc.2` 的安装与加载。这些检查覆盖安装和模块加载；升级 Host 后仍需核对 GUI 操作和模型执行。
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
