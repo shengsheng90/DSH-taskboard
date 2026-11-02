@@ -37,6 +37,6 @@ git add src generated scripts package.json pnpm-lock.yaml lib
 
 `pnpm test:package` 在临时目录安装实际 tarball，启用 peer 自动安装和严格校验，并禁用消费者脚本；确认没有额外下载 Harness/React。随后用一套宿主依赖加载已安装 Host，创建 SQLite 项目，验证新旧 codec 入口与浏览器 bundle 的注册。还通过临时 Git 仓库安装预构建树，允许正常脚本策略，确认没有消费者构建和开发依赖。负向检查删除和篡改 client 入口，确保发布校验拒绝。
 
-设置 `DSH_SMOKE_RUNTIME` 为包含真实 `@deepseek-ai/dsh` 的安装目录时，还会运行真实 `dsh plugin add` 与 `--dump-config`，不设置版本豁免，再用该宿主的 SDK 执行模块冒烟。CI 覆盖固定开发基线，以及 Harness `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` 在 Node 22 / 24 下的安装与加载，消费者安装分别用 pnpm 11.15.1 / 12.6.0。真实 dsh CLI 使用其自带的 pnpm。
+设置 `DSH_SMOKE_RUNTIME` 为包含真实 `@deepseek-ai/dsh` 的安装目录时，还会运行真实 `dsh plugin add` 与 `--dump-config`，不设置版本豁免，再用该宿主的 SDK 执行模块冒烟。CI 覆盖固定开发基线，以及 Harness `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-rc.2` 在 Node 22 / 24 下的安装与加载，消费者安装分别用 pnpm 11.15.1 / 12.6.0。真实 dsh CLI 使用其自带的 pnpm。
 
 不再按 Harness 版本号拦截安装，不等于所有版本的 API 自动兼容。上游若改动 API、浏览器注入契约或执行接口，仍应增加适配并扩展测试。冒烟不代替完整 GUI 操作和真实模型自动化验收。宿主升级时，先以新版本运行这套矩阵，发现实际 API 差异时修复适配。不要自动执行 `allow-version --accept-risk`，也不要吞掉构建失败继续发布缺产物的包。

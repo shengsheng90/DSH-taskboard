@@ -9,7 +9,7 @@ This README is written so a human **or another coding agent** can install the pl
 **Package:** `@shengsheng/dsh-taskboard`  
 **Repository:** https://github.com/shengsheng90/DSH-taskboard  
 **License:** Apache-2.0  
-**Host version policy:** DSH runtime peers use `*` (no version gate). Installation/loading is tested against `0.1.6-alpha.1`, `0.1.7-rc.1/rc.2`, and `0.2.0-rc.1/rc.2`. This verifies installation and module loading; GUI operations and model execution still need checking after a Host upgrade.
+**Host version policy:** DSH runtime peers use `*` (no version gate). Installation/loading is tested against `0.1.6-alpha.1`, `0.1.7-rc.1/rc.2`, `0.2.0-rc.1/rc.2`, and `0.2.1-rc.2`. This verifies installation and module loading; GUI operations and model execution still need checking after a Host upgrade.
 
 ![Native Taskboard board, task detail, and workflow views](docs/assets/taskboard-demo.gif)
 
